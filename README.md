@@ -1,4 +1,4 @@
-# theory of everything
+# work-time-field
 
 This project presents a comprehensive, dual-language theoretical and computational framework to model mass, field dynamics, spacetime distortion, and energy transfer using structured graviton work. It includes:
 
@@ -21,7 +21,7 @@ streamlit run main_app.py
 
 ## Documentation
 
-See `уравнения.pdf`, `теория всего.pdf` for the theoretical foundation, including all derived equations and experimental models. Bilingual (English and Russian).
+See `уравнения.pdf`, `теория.pdf` for the theoretical foundation, including all derived equations and experimental models. Bilingual (English and Russian).
 
 ## License
 
