@@ -1,4 +1,4 @@
-# work-time-field
+# theory of everything
 
 This project presents a comprehensive, dual-language theoretical and computational framework to model mass, field dynamics, spacetime distortion, and energy transfer using structured graviton work. It includes:
 
