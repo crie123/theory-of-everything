@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+        canvas { display: block; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #0f0;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 12px;
+            z-index: 100;
+            min-width: 250px;
+        }
+        .control-group {
+            margin-bottom: 12px;
+        }
+        .control-label {
+            display: block;
+            margin-bottom: 4px;
+            font-weight: bold;
+        }
+        input[type="range"] {
+            width: 100%;
+            cursor: pointer;
+        }
+        .value-display {
+            display: inline-block;
+            margin-left: 8px;
+            color: #0ff;
+        }
+        #legend {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #0f0;
+            padding: 12px;
+            border-radius: 8px;
+            font-size: 10px;
+            max-width: 240px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .legend-item {
+            margin-bottom: 3px;
+        }
+        .color-box {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            margin-right: 6px;
+            vertical-align: middle;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <div class="control-group">
+        <label class="control-label">Zoom</label>
+        <input type="range" id="zoomSlider" min="1" max="100" value="25" step="0.5">
+        <span class="value-display" id="zoomValue">25.0</span>
+    </div>
+    
+    <div class="control-group">
+        <label class="control-label">Azimuth</label>
+        <input type="range" id="azimuthSlider" min="-180" max="180" value="0" step="1">
+        <span class="value-display" id="azimuthValue">0°</span>
+    </div>
+    
+    <div class="control-group">
+        <label class="control-label">Elevation</label>
+        <input type="range" id="elevationSlider" min="0" max="90" value="30" step="1">
+        <span class="value-display" id="elevationValue">30°</span>
+    </div>
+
+    <div class="control-group">
+        <label class="control-label">Auto Rotate</label>
+        <input type="checkbox" id="autoRotate" checked>
+    </div>
+</div>
+
+<div id="legend">
+    <strong>Particles & Elements:</strong><br>
+    <div class="legend-item">
+        <span class="color-box" style="background: #9933ff;"></span>nu (Neutrino)
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #ff66ff;"></span>e (Electron)
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #ff3333;"></span>p (Proton)
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #4444ff;"></span>H (Hydrogen)
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #44ffff;"></span>He (Helium)
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #00ff00;"></span>C (Carbon)
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #ffaa00;"></span>O (Oxygen)
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #ff0000;"></span>Fe (Iron)
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #ffff00; border: 1px solid #fff;"></span>White Hole
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #000000; border: 2px solid #ffff00;"></span>Black Hole
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #ff00ff; border: 1px dashed #0ff;"></span>Universe Bubble
+    </div>
+    <div class="legend-item">
+        <span class="color-box" style="background: #00ff00; border: 2px solid #ffff00;"></span>Work Node
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.158/build/three.min.js"></script>
+<script>
+const data = __DATA__;
+
+const el_color = {
+    "nu": 0x9933ff,
+    "e": 0xff66ff,
+    "p": 0xff3333,
+    "n": 0x666666,
+    "H": 0x4444ff,
+    "He": 0x44ffff,
+    "C": 0x00ff00,
+    "O": 0xffaa00,
+    "Fe": 0xff0000,
+    "Ni": 0xaa00ff,
+    "bh": 0x000000,
+    "white": 0xffff00,
+    "bubble": 0xff00ff,
+    "node": 0x00ff00
+};
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000010);
+
+const camera = new THREE.PerspectiveCamera(60, window.innerWidth/600, 0.1, 500);
+
+const renderer = new THREE.WebGLRenderer({antialias: true});
+renderer.setSize(window.innerWidth, 600);
+document.body.appendChild(renderer.domElement);
+
+const light = new THREE.PointLight(0xffffff, 2);
+light.position.set(20, 20, 20);
+scene.add(light);
+
+// Render all bodies
+data.forEach(b => {
+    let color = el_color[b.el] || 0x888888;
+    
+    if(b.kind == "white") color = 0xffff00;
+    if(b.kind == "bh") color = 0x000000;
+    if(b.kind == "bubble") color = 0xff00ff;
+    if(b.kind == "node") color = 0x00ff00;
+
+    const geo = new THREE.SphereGeometry(Math.max(b.r, 0.05), 16, 16);
+    const mat = new THREE.MeshStandardMaterial({
+        color,
+        emissive: color,
+        emissiveIntensity: b.kind == "white" ? 0.8 : (b.kind == "node" ? 0.9 : (b.kind == "bubble" ? 0.6 : 0.3)),
+        roughness: 0.6
+    });
+
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(b.x, b.y, b.z);
+    scene.add(m);
+});
+
+// White hole zone
+const whiteZone = new THREE.SphereGeometry(3.0, 32, 32);
+const zoneMat = new THREE.MeshBasicMaterial({
+    color: 0xffff00,
+    transparent: true,
+    opacity: 0.08,
+    wireframe: true
+});
+const zone = new THREE.Mesh(whiteZone, zoneMat);
+zone.position.set(0, 0, 0);
+scene.add(zone);
+
+// White hole aura
+const whiteHoleAura = new THREE.SphereGeometry(3.5, 32, 32);
+const auraMat = new THREE.MeshBasicMaterial({
+    color: 0xffff00,
+    transparent: true,
+    opacity: 0.1,
+    wireframe: true
+});
+const aura = new THREE.Mesh(whiteHoleAura, auraMat);
+aura.position.set(0, 0, 0);
+scene.add(aura);
+
+// White hole jets
+const jetGeo = new THREE.CylinderGeometry(0.15, 0.4, 6, 16);
+const jetMat = new THREE.MeshBasicMaterial({
+    color: 0xffff00,
+    transparent: true,
+    opacity: 0.5
+});
+const jetUp = new THREE.Mesh(jetGeo, jetMat);
+jetUp.position.set(0, 3, 0);
+scene.add(jetUp);
+
+const jetDown = new THREE.Mesh(jetGeo, jetMat);
+jetDown.position.set(0, -3, 0);
+scene.add(jetDown);
+
+// Phase wall at PHASE_WALL_R = 12
+const phaseWall = new THREE.SphereGeometry(12.0, 32, 32);
+const wallMat = new THREE.MeshBasicMaterial({
+    color: 0x00ffff,
+    transparent: true,
+    opacity: 0.05,
+    wireframe: true
+});
+const wall = new THREE.Mesh(phaseWall, wallMat);
+wall.position.set(0, 0, 0);
+scene.add(wall);
+
+// Space decay boundary at SPACE_DECAY_R = 18
+const decayBoundary = new THREE.SphereGeometry(18.0, 32, 32);
+const decayMat = new THREE.MeshBasicMaterial({
+    color: 0xff0000,
+    transparent: true,
+    opacity: 0.03,
+    wireframe: true
+});
+const decay = new THREE.Mesh(decayBoundary, decayMat);
+decay.position.set(0, 0, 0);
+scene.add(decay);
+
+// Work density local radius visualization (r=2.0 for each node)
+const workRadii = [];
+data.forEach(b => {
+    if(b.kind == "node") {
+        const localRad = new THREE.SphereGeometry(2.0, 24, 24);
+        const localMat = new THREE.MeshBasicMaterial({
+            color: 0x00ff00,
+            transparent: true,
+            opacity: 0.02,
+            wireframe: true
+        });
+        const local = new THREE.Mesh(localRad, localMat);
+        local.position.set(b.x, b.y, b.z);
+        scene.add(local);
+    }
+});
+
+// Space grid
+const grid = new THREE.GridHelper(40, 40, 0x333333, 0x111111);
+scene.add(grid);
+
+// Camera control
+let cameraState = {
+    zoom: 25,
+    azimuth: 0,
+    elevation: 30,
+    autoRotate: true,
+    autoRotateSpeed: 0.0002,
+    mouseDown: false,
+    lastMouseX: 0,
+    lastMouseY: 0,
+    mouseSensitivity: 0.5
+};
+
+function updateCameraPosition() {
+    const rad = cameraState.zoom;
+    const azRad = (cameraState.azimuth * Math.PI) / 180;
+    const elRad = (cameraState.elevation * Math.PI) / 180;
+    
+    camera.position.x = rad * Math.cos(azRad) * Math.cos(elRad);
+    camera.position.y = rad * Math.sin(elRad);
+    camera.position.z = rad * Math.sin(azRad) * Math.cos(elRad);
+    
+    camera.lookAt(0, 0, 0);
+}
+
+const zoomSlider = document.getElementById('zoomSlider');
+const azimuthSlider = document.getElementById('azimuthSlider');
+const elevationSlider = document.getElementById('elevationSlider');
+const autoRotateCheckbox = document.getElementById('autoRotate');
+
+const zoomValue = document.getElementById('zoomValue');
+const azimuthValue = document.getElementById('azimuthValue');
+const elevationValue = document.getElementById('elevationValue');
+
+zoomSlider.addEventListener('input', (e) => {
+    cameraState.zoom = parseFloat(e.target.value);
+    zoomValue.textContent = cameraState.zoom.toFixed(1);
+    updateCameraPosition();
+});
+
+azimuthSlider.addEventListener('input', (e) => {
+    cameraState.azimuth = parseFloat(e.target.value);
+    azimuthValue.textContent = cameraState.azimuth.toFixed(0) + '°';
+    updateCameraPosition();
+});
+
+elevationSlider.addEventListener('input', (e) => {
+    cameraState.elevation = parseFloat(e.target.value);
+    elevationValue.textContent = cameraState.elevation.toFixed(0) + '°';
+    updateCameraPosition();
+});
+
+autoRotateCheckbox.addEventListener('change', (e) => {
+    cameraState.autoRotate = e.target.checked;
+});
+
+// Mouse wheel zoom
+renderer.domElement.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 1.1 : 0.9;
+    cameraState.zoom *= delta;
+    cameraState.zoom = Math.max(1, Math.min(100, cameraState.zoom));
+    zoomSlider.value = cameraState.zoom;
+    zoomValue.textContent = cameraState.zoom.toFixed(1);
+    updateCameraPosition();
+}, { passive: false });
+
+// Mouse drag control - manage camera rotation with mouse
+renderer.domElement.addEventListener('mousedown', (e) => {
+    cameraState.mouseDown = true;
+    cameraState.lastMouseX = e.clientX;
+    cameraState.lastMouseY = e.clientY;
+});
+
+renderer.domElement.addEventListener('mousemove', (e) => {
+    if (!cameraState.mouseDown) return;
+
+    const deltaX = e.clientX - cameraState.lastMouseX;
+    const deltaY = e.clientY - cameraState.lastMouseY;
+
+    cameraState.lastMouseX = e.clientX;
+    cameraState.lastMouseY = e.clientY;
+
+    // Azimuth control (horizontal mouse movement)
+    cameraState.azimuth += deltaX * cameraState.mouseSensitivity;
+    if (cameraState.azimuth > 180) cameraState.azimuth -= 360;
+    if (cameraState.azimuth < -180) cameraState.azimuth += 360;
+
+    // Elevation control (vertical mouse movement)
+    cameraState.elevation -= deltaY * cameraState.mouseSensitivity * 0.5;
+    cameraState.elevation = Math.max(0, Math.min(90, cameraState.elevation));
+
+    // Update sliders
+    azimuthSlider.value = cameraState.azimuth;
+    azimuthValue.textContent = cameraState.azimuth.toFixed(0) + '°';
+    elevationSlider.value = cameraState.elevation;
+    elevationValue.textContent = cameraState.elevation.toFixed(0) + '°';
+
+    updateCameraPosition();
+});
+
+renderer.domElement.addEventListener('mouseup', () => {
+    cameraState.mouseDown = false;
+});
+
+renderer.domElement.addEventListener('mouseleave', () => {
+    cameraState.mouseDown = false;
+});
+
+// Right mouse button for zoom control (alternative zoom method)
+renderer.domElement.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+});
+
+renderer.domElement.addEventListener('mousedown', (e) => {
+    if (e.button === 2) {  // Right mouse button
+        cameraState.zoomDragStart = cameraState.lastMouseY;
+    }
+});
+
+renderer.domElement.addEventListener('mousemove', (e) => {
+    if (cameraState.zoomDragStart !== undefined) {
+        const deltaY = e.clientY - cameraState.zoomDragStart;
+        cameraState.zoom *= (1 - deltaY * 0.005);
+        cameraState.zoom = Math.max(1, Math.min(100, cameraState.zoom));
+        zoomSlider.value = cameraState.zoom;
+        zoomValue.textContent = cameraState.zoom.toFixed(1);
+        cameraState.zoomDragStart = e.clientY;
+        updateCameraPosition();
+    }
+});
+
+renderer.domElement.addEventListener('mouseup', (e) => {
+    if (e.button === 2) {
+        cameraState.zoomDragStart = undefined;
+    }
+});
+
+// Keyboard controls
+const keys = {};
+window.addEventListener('keydown', (e) => {
+    keys[e.key] = true;
+    
+    if(e.key.toLowerCase() === 'r') {
+        cameraState.zoom = 25;
+        cameraState.azimuth = 0;
+        cameraState.elevation = 30;
+        zoomSlider.value = 25;
+        azimuthSlider.value = 0;
+        elevationSlider.value = 30;
+        zoomValue.textContent = '25.0';
+        azimuthValue.textContent = '0°';
+        elevationValue.textContent = '30°';
+        updateCameraPosition();
+    }
+});
+
+window.addEventListener('keyup', (e) => {
+    keys[e.key] = false;
+});
+
+updateCameraPosition();
+
+function animate(){
+    requestAnimationFrame(animate);
+    
+    // Rotate boundary zones
+    zone.rotation.x += 0.0003;
+    zone.rotation.z += 0.0002;
+    aura.rotation.x += 0.0005;
+    aura.rotation.z += 0.0003;
+    wall.rotation.x += 0.0002;
+    decay.rotation.z += 0.0001;
+    
+    // Arrow key controls
+    const rotSpeed = 1.5;
+    if(keys['ArrowLeft'] || keys['a']) {
+        cameraState.azimuth -= rotSpeed;
+        azimuthSlider.value = cameraState.azimuth;
+        azimuthValue.textContent = cameraState.azimuth.toFixed(0) + '°';
+        updateCameraPosition();
+    }
+    if(keys['ArrowRight'] || keys['d']) {
+        cameraState.azimuth += rotSpeed;
+        azimuthSlider.value = cameraState.azimuth;
+        azimuthValue.textContent = cameraState.azimuth.toFixed(0) + '°';
+        updateCameraPosition();
+    }
+    if(keys['ArrowUp'] || keys['w']) {
+        cameraState.elevation = Math.min(90, cameraState.elevation + rotSpeed);
+        elevationSlider.value = cameraState.elevation;
+        elevationValue.textContent = cameraState.elevation.toFixed(0) + '°';
+        updateCameraPosition();
+    }
+    if(keys['ArrowDown'] || keys['s']) {
+        cameraState.elevation = Math.max(0, cameraState.elevation - rotSpeed);
+        elevationSlider.value = cameraState.elevation;
+        elevationValue.textContent = cameraState.elevation.toFixed(0) + '°';
+        updateCameraPosition();
+    }
+    
+    // Auto rotate
+    if(cameraState.autoRotate) {
+        cameraState.azimuth += cameraState.autoRotateSpeed * 180 / Math.PI;
+        if(cameraState.azimuth > 180) cameraState.azimuth -= 360;
+        azimuthSlider.value = cameraState.azimuth;
+        azimuthValue.textContent = cameraState.azimuth.toFixed(0) + '°';
+        updateCameraPosition();
+    }
+    
+    renderer.render(scene, camera);
+}
+animate();
+</script>
+</body>
+</html>
