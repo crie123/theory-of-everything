@@ -1,326 +1,780 @@
 import numpy as np
+from collections import defaultdict
 
-G = 0.05
-H = 0.002
-C_CRIT = 0.98
+# ============================================================
+# GLOBAL PHYSICS CONSTANTS
+# ============================================================
+G      = 0.2       # Gravitational constant
+H      = 0.0005    # Hubble expansion rate
+C_CRIT = 0.98      # Coherence threshold → frozen state
 
-# Energy thresholds (MeV)
+# Energy thresholds (MeV-analogue)
 TH_NU_E  = 0.782
 TH_E_P   = 1.293
 TH_PN    = 9.592
 TH_STAB  = 8.7
 
 # Framework feeding
-FRAMEWORK_FEED = False
-FEED_RATE = 0.1
-FEED_ENERGY = 6.0
+FRAMEWORK_FEED          = True
+FEED_RATE               = 0.3
+FEED_ENERGY             = 400.0
+FEED_PARTICLES_PER_TICK = 1
 
 WHITE_RADIUS = 3.0
 
-# Black hole parameters - WTF Singularity Criterion
-CRITICAL_WORK_DENSITY = 120.0  # Critical work density threshold
-COLLAPSE_SPEED = 0.25           # Collapse speed multiplier
-BH_MERGE_DIST = 1.2
-BH_EXPLODE_E = 200
-BH_COLLAPSE_W = 50
-WORK_GRADIENT_MIN = 2.0         # Min velocity gradient for BH spawn
+# Black hole
+CRITICAL_WORK_DENSITY = 120.0
+COLLAPSE_SPEED        = 0.25
+BH_MERGE_DIST         = 1.2
+BH_EXPLODE_E          = 200
+BH_COLLAPSE_W         = 50
+WORK_GRADIENT_MIN     = 2.0
 
-# Multiverse parameters
+# Multiverse / space
 MULTIVERSE_RATE = 0.0005
-PHASE_WALL_R = 12
-SPACE_DECAY_R = 18
+PHASE_WALL_R    = 25
+SPACE_DECAY_R   = 35
 
-# Thermodynamics - Bubble creation
-BUBBLE_FORMATION_COST = 5000     # how much mass to burn
-BUBBLE_MIN_ENERGY = 300         # minimum local energy
-INTERNAL_NODE_RATE = 0.002      # was 0.02 -> much less
+# Bubble / thermodynamics
+BUBBLE_FORMATION_COST  = 150
+BUBBLE_MIN_ENERGY      = 300
+INTERNAL_NODE_RATE     = 0.002
 INTERNAL_NODE_STRENGTH = 1.0
 
-# Internal node control
-NODE_BURN_RATE = 0.0005         # probability of node burnout
-NODE_MAX_AGE = 4000             # maximum node age
+# Node params
+NODE_BURN_RATE     = 0.0005
+NODE_MAX_AGE       = 4000
+NODE_BASE_COUNT    = 4
+NODE_RADIUS        = 2.5   # raised: ensure nu clouds find node field
+NODE_STRENGTH_BASE = 63.0
+NODE_DRIFT         = 0.0015
 
-# New work node parameters (интеграция новых функций)
-NODE_BASE_COUNT = 4              # basic node count
-NODE_RADIUS = 1.5                # zone of influence
-NODE_STRENGTH_BASE = 18.0        # weaker
-NODE_DRIFT = 0.0015              # node drift
+# Node drift speed per epoch:
+# epoch 0-1 : fast outward (radiation pressure / ionization front)
+# epoch 2   : slowing (recombination)
+# epoch 3+  : nearly frozen (dark-matter halo anchoring)
+NODE_DRIFT_BY_EPOCH = {0: 5.08, 1: 3.05, 2: 1.012, 3: 0.004,
+                       4: 0.002, 5: 0.001, 6: 0.001, 7: 0.001}
 
-# Universe feedback
-UNIVERSE_WORK_FEEDBACK = 0.03   # coefficient of feedback
+# How many steps a newly formed element survives before the burnout
+# check can destroy it.  Prevents the "instant dissociation" loop.
+ASSEMBLY_GRACE_STEPS = {"e": 8, "p": 15, "H": 40, "He": 80}
 
-# Bubble types with energy and node rate
+UNIVERSE_WORK_FEEDBACK = 0.02
+
 BUBBLE_TYPES = {
-    "H":  {"base_el": "H",  "node_bias": 1.0, "energy": 120, "node_rate": 0.002},
-    "He": {"base_el": "He", "node_bias": 1.8, "energy": 200, "node_rate": 0.006},
-    "exotic": {"base_el": "C",  "node_bias": 0.6, "energy": 300, "node_rate": 0.01}
+    "H":     {"base_el": "H",  "node_bias": 1.0, "energy": 120, "node_rate": 0.002},
+    "He":    {"base_el": "He", "node_bias": 1.8, "energy": 200, "node_rate": 0.006},
+    "exotic":{"base_el": "C",  "node_bias": 0.6, "energy": 300, "node_rate": 0.01},
 }
 
-# Framework thermodynamic reservoir
-FRAMEWORK_RESERVOIR = 1e7       # "battery" of the framework
-FRAMEWORK_DECAY = 0.00001       # degradation of the framework
+FRAMEWORK_RESERVOIR = 20_000_000
+FRAMEWORK_DECAY     = 0.00001
 
 ELEMENTS = ["nu", "e", "p", "n", "H", "He", "C", "O", "Fe", "Ni"]
 
-# Global framework reservoir (must be accessible across updates)
+# ============================================================
+# SPH CLOUD PARAMETERS
+# ============================================================
+# Each Cloud = macro-particle representing a gas cloud of N micro-particles.
+# Internal physics: temperature T, SPH density rho, pressure P, sound speed cs.
+#
+# SPH_H      — kernel smoothing length (neighbourhood radius = 2*SPH_H)
+# SPH_GAMMA  — adiabatic index (5/3 monatomic, 4/3 radiation-dominated)
+# Viscosity α,β prevent cloud interpenetration (Monaghan 1992)
+
+SPH_GAMMA      = 5.0 / 3.0   # monatomic ideal gas (matter era)
+SPH_GAMMA_RAD  = 4.0 / 3.0   # radiation-dominated (epochs 0-1)
+SPH_H          = 3.5          # smoothing length
+SPH_ALPHA_VISC = 1.0          # artificial viscosity α
+SPH_BETA_VISC  = 2.0          # artificial viscosity β
+SPH_C_MIN      = 0.1          # minimum sound speed
+CLOUD_COOL_RATE  = 0.0008     # base cooling rate per step
+CLOUD_MERGE_FRAC = 0.5        # merge overlap threshold (fraction of sum-radii)
+CLOUD_SPLIT_MASS = 5000       # Jeans mass: fragment if cloud exceeds this
+CLOUD_MIN_MASS   = 5          # evaporation threshold
+
+
+# -------- SPH cubic spline kernel (vectorized) --------
+
+def _sph_kernel_w_vec(dist_arr, h):
+    """W(r,h) for array of distances."""
+    q     = dist_arr / h
+    sigma = 1.0 / (np.pi * h**3)
+    W = np.where(q < 1.0,  sigma * (1 - 1.5*q**2 + 0.75*q**3),
+        np.where(q < 2.0,  sigma * 0.25*(2 - q)**3,
+                           0.0))
+    return W
+
+
+def _sph_kernel_dw_vec(dist_arr, h):
+    """dW/dq scalar for array of distances (for gradient)."""
+    q     = dist_arr / h
+    sigma = 1.0 / (np.pi * h**3)
+    dWdq  = np.where(q < 1.0,  sigma * (-3*q + 2.25*q**2),
+             np.where(q < 2.0,  sigma * (-0.75*(2 - q)**2),
+                                0.0))
+    return dWdq
+
+
+# ============================================================
+# COSMIC EPOCH SYSTEM
+# ============================================================
+COSMIC_EPOCHS = {
+    0: {"name": "Big Bang / Quark-Gluon Plasma",  "emoji": "💥",
+        "description": "Extreme energy, only quarks and leptons", "color": "#FF4500"},
+    1: {"name": "Primordial Nucleosynthesis",      "emoji": "⚛️",
+        "description": "Protons & neutrons fuse into H, He-4, Li", "color": "#FF8C00",
+        "iteration_start": 30},
+    2: {"name": "Recombination / Dark Ages",       "emoji": "🌑",
+        "description": "Universe cools, neutral atoms form, photons decouple", "color": "#4B0082",
+        "iteration_start": 80},
+    3: {"name": "First Stars (Pop III)",           "emoji": "🌟",
+        "description": "Massive, metal-free stars ignite — UV floods the universe", "color": "#FFD700",
+        "iteration_start": 150},
+    4: {"name": "Reionization",                    "emoji": "☀️",
+        "description": "First stars re-ionize surrounding gas", "color": "#00BFFF",
+        "iteration_start": 220},
+    5: {"name": "First Galaxies",                  "emoji": "🌌",
+        "description": "Protogalaxies assemble around dark matter halos", "color": "#7B68EE",
+        "iteration_start": 300},
+    6: {"name": "Cosmic Noon",                     "emoji": "🔥",
+        "description": "Peak star formation rate, quasar activity", "color": "#FF6347",
+        "iteration_start": 450},
+    7: {"name": "Modern Universe",                 "emoji": "🪐",
+        "description": "Galaxies mature, dark energy dominates", "color": "#20B2AA",
+        "iteration_start": 650},
+}
+
 _framework_reservoir = FRAMEWORK_RESERVOIR
+_current_epoch       = 0
 
-# --- body ---
-class Body:
-    def __init__(self, pos, mass, radius, kind, el="nu"):
-        self.pos = np.array(pos, float)
-        self.vel = np.random.randn(3) * 0.01
-        self.mass = mass
-        self.radius = radius
-        self.kind = kind
-        self.el = el
-        self.energy = FEED_ENERGY
-        self.work = 0
-        self.state = "material"
-        self.coherence = np.random.rand()
+# ── Collapse event log ────────────────────────────────────────────────────
+# Each entry: {"step": int, "type": str, "pos": array, "mass": float,
+#              "peak_density": float, "galaxy_size": int}
+# type: "galactic_bh"  — galaxy collapse → central supermassive BH
+#        "direct_collapse" — mass lost without BH stage (below Chandrasekhar)
+#        "agn_flare"       — existing BH accretes enough to flare
+COLLAPSE_LOG = []
+
+def log_collapse(step, ctype, pos, mass, peak_density, galaxy_size=0):
+    COLLAPSE_LOG.append({
+        "step": step, "type": ctype,
+        "pos": pos.copy(), "mass": float(mass),
+        "peak_density": float(peak_density),
+        "galaxy_size": int(galaxy_size),
+    })
+
+
+def get_current_epoch(iteration):
+    epoch = 0
+    for eid, edata in COSMIC_EPOCHS.items():
+        if eid == 0:
+            continue
+        if iteration >= edata.get("iteration_start", 9999):
+            epoch = eid
+    return epoch
+
+
+def get_epoch_info(iteration):
+    return COSMIC_EPOCHS[get_current_epoch(iteration)]
+
+
+# ============================================================
+# SPATIAL HASH
+# ============================================================
+class SpatialHash:
+    def __init__(self, cell_size=4.0):
+        self.cell_size = cell_size
+        self.grid = defaultdict(list)
+
+    def _key(self, pos):
+        cs = self.cell_size
+        return (int(pos[0]//cs), int(pos[1]//cs), int(pos[2]//cs))
+
+    def build(self, bodies):
+        self.grid.clear()
+        for b in bodies:
+            self.grid[self._key(b.pos)].append(b)
+
+    def query_radius(self, pos, radius):
+        r_cells = int(radius / self.cell_size) + 1
+        cx, cy, cz = self._key(pos)
+        candidates = []
+        for dx in range(-r_cells, r_cells + 1):
+            for dy in range(-r_cells, r_cells + 1):
+                for dz in range(-r_cells, r_cells + 1):
+                    candidates.extend(self.grid.get((cx+dx, cy+dy, cz+dz), []))
+        if not candidates:
+            return []
+        cpos  = np.array([b.pos for b in candidates])
+        diff  = cpos - np.array(pos)
+        dsq   = (diff*diff).sum(axis=1)
+        mask  = dsq <= radius*radius
+        return [b for b, m in zip(candidates, mask) if m]
+
+
+spatial_hash = SpatialHash(cell_size=4.0)
+
+
+# ============================================================
+# CLOUD  —  SPH macro-particle
+# ============================================================
+class Cloud:
+    """
+    A Cloud is one SPH macro-particle representing a gas/plasma cloud.
+
+    Physical state:
+      pos    — centre of mass  [3-vector]
+      vel    — bulk drift velocity
+      mass   — total enclosed mass
+      T      — temperature  (internal energy per unit mass proxy)
+      rho    — SPH-estimated mass density (recomputed each step)
+      P      — thermal pressure  = (γ-1)·ρ·T
+      cs     — sound speed       = sqrt(γ·P/ρ)
+      el     — dominant element  (chemistry label)
+      kind   — "cloud" | "star" | "whitehole" | "bh"
+      N      — number of micro-particles represented
+    """
+
+    __slots__ = [
+        "pos","vel","mass","radius","kind","el","N",
+        "T","rho","P","cs",
+        "work","state","coherence","cluster_id",
+        "_sph_ready","_el_age",
+    ]
+
+    def __init__(self, pos, mass, radius, kind="cloud", el="nu",
+                 temperature=None, N=1):
+        self.pos    = np.array(pos, float)
+        self.vel    = np.random.randn(3) * 0.01
+        self.mass   = float(mass)
+        self.radius = float(radius)
+        self.kind   = kind
+        self.el     = el
+        self.N      = int(N)
+
+        self.T      = float(temperature) if temperature is not None else FEED_ENERGY
+        self.rho    = mass / max(4/3*np.pi*radius**3, 1e-6)
+        self.P      = max(0.0, (SPH_GAMMA-1)*self.rho*self.T)
+        self.cs     = max(SPH_C_MIN, np.sqrt(abs(SPH_GAMMA*self.P/max(self.rho,1e-9))))
+
+        self.work       = 0.0
+        self.state      = "material"
+        self.coherence  = np.random.rand()
         self.cluster_id = None
+        self._sph_ready = False
+        # grace counter per element: prevents instant burnout-loop
+        self._el_age    = 0   # steps since last element change
 
-    def gravity(self, others):
-        F = np.zeros(3)
-        for o in others:
-            if o is self: 
-                continue
-            r = o.pos - self.pos
-            d = np.linalg.norm(r) + 1e-6
-            F += G * self.mass * o.mass * r / (d**3)
+    # --- legacy energy alias ---
+    @property
+    def energy(self):
+        return self.T
+    @energy.setter
+    def energy(self, v):
+        self.T = float(v)
+
+    # --- thermodynamics ---
+
+    def update_thermo(self, epoch=0):
+        gamma = SPH_GAMMA_RAD if epoch <= 1 else SPH_GAMMA
+        self.P  = max(0.0, (gamma-1)*self.rho*self.T)
+        self.cs = max(SPH_C_MIN,
+                      np.sqrt(abs(gamma*self.P/max(self.rho, 1e-9))))
+
+    def cool(self, dt, epoch=0):
+        """Hubble + radiative cooling."""
+        hub = (2 if epoch <= 1 else 1) * H * self.T
+        self.T = max(0.01, self.T - (CLOUD_COOL_RATE + hub)*dt*self.T)
+        self.update_thermo(epoch)
+
+    # --- SPH density (vectorized, called from sph_density_pass) ---
+
+    def set_density_from_neighbors(self, neighbor_pos, neighbor_mass):
+        """Called by the global SPH pass with pre-built arrays."""
+        dist = np.linalg.norm(neighbor_pos - self.pos, axis=1)
+        W    = _sph_kernel_w_vec(dist, SPH_H)
+        self.rho      = max(float(np.dot(neighbor_mass, W)), 1e-6)
+        self._sph_ready = True
+
+    # --- forces ---
+
+    def _pressure_visc_force(self, neighbors):
+        """
+        Combined SPH pressure gradient + Monaghan artificial viscosity.
+        F_i = -m_i Σ_j m_j [ (P_i/ρ_i² + P_j/ρ_j²) + Π_ij ] ∇W_ij
+        """
+        if not neighbors:
+            return np.zeros(3)
+
+        nb_pos   = np.array([n.pos  for n in neighbors])
+        nb_mass  = np.array([n.mass for n in neighbors])
+        nb_P     = np.array([n.P    for n in neighbors])
+        nb_rho   = np.array([n.rho  for n in neighbors])
+        nb_vel   = np.array([n.vel  for n in neighbors])
+        nb_cs    = np.array([n.cs   for n in neighbors])
+
+        rvec   = self.pos - nb_pos          # (N,3)  r_i - r_j
+        dist   = np.linalg.norm(rvec, axis=1)  # (N,)
+        safe_d = np.maximum(dist, 1e-9)
+
+        # Kernel gradient direction: ∇W = (dW/dq)(1/h) * r̂
+        dWdq   = _sph_kernel_dw_vec(dist, SPH_H)
+        rhat   = rvec / safe_d[:, None]
+        gradW  = (dWdq / SPH_H)[:, None] * rhat   # (N,3)
+
+        # Pressure term
+        pi_i   = self.P / max(self.rho**2, 1e-12)
+        pj     = nb_P / np.maximum(nb_rho**2, 1e-12)
+        pterm  = (pi_i + pj)                        # (N,)
+
+        # Artificial viscosity
+        vrel   = self.vel - nb_vel                  # (N,3)
+        rv     = (vrel * rvec).sum(axis=1)          # (N,)
+        approaching = rv < 0
+        mu     = np.where(approaching,
+                          SPH_H * rv / (dist**2 + 0.01*SPH_H**2),
+                          0.0)
+        rho_avg = 0.5*(self.rho + nb_rho)
+        cs_avg  = 0.5*(self.cs  + nb_cs)
+        pi_visc = np.where(approaching,
+                           (-SPH_ALPHA_VISC*cs_avg*mu + SPH_BETA_VISC*mu**2) / rho_avg,
+                           0.0)
+
+        coeff  = nb_mass * (pterm + pi_visc)        # (N,)
+        F      = -self.mass * (coeff[:, None] * gradW).sum(axis=0)
         return F
 
-    def update(self, others, dt, nodes=None):
-        # Expansion
+    def _gravity_force(self, neighbors):
+        """Long-range gravity (SPH neighborhood)."""
+        if not neighbors:
+            return np.zeros(3)
+        nb_pos  = np.array([n.pos  for n in neighbors])
+        nb_mass = np.array([n.mass for n in neighbors])
+        rvec    = nb_pos - self.pos
+        dist    = np.linalg.norm(rvec, axis=1) + 1e-6
+        F       = G * self.mass * ((nb_mass / dist**3)[:, None] * rvec).sum(axis=0)
+        return F
+
+    # --- master update ---
+
+    def update(self, others, dt, nodes=None, use_spatial=True, epoch=0):
+        # 1. Hubble flow
         self.vel += self.pos * H * dt
 
-        # Gravity
-        a = self.gravity(others) / self.mass
-        self.vel += a * dt
+        # 2. Neighbours
+        nb = (spatial_hash.query_radius(self.pos, SPH_H*2)
+              if (use_spatial and spatial_hash.grid) else others)
+        nb = [n for n in nb if n is not self]
 
-        # Work field influence from nodes
+        # 3. SPH density (if global pass skipped this cloud)
+        if not self._sph_ready and nb:
+            nb_pos  = np.array([n.pos  for n in nb])
+            nb_mass = np.array([n.mass for n in nb])
+            self.set_density_from_neighbors(nb_pos, nb_mass)
+
+        # 4. Forces
+        F = self._pressure_visc_force(nb) + self._gravity_force(nb)
         if nodes:
-            w_field = work_field(self, nodes)
-            self.vel += w_field * dt
+            F += work_field_fast(self, nodes)
 
+        a = F / max(self.mass, 1e-6)
+        a_mag = np.linalg.norm(a)
+        if a_mag > 5.0:
+            a = a * 5.0 / a_mag
+        self.vel += a * dt
+        self.vel *= 0.985
         self.pos += self.vel * dt
-
-        # Work accumulation
         self.work += np.linalg.norm(a) * dt
 
-        # Phase transition
-        self.coherence += 0.001 * dt
+        # 5. Viscous heating + cooling
+        visc_heat = np.linalg.norm(F) * 0.0001 * dt
+        self.T    = max(0.01, self.T + visc_heat)
+        self.cool(dt, epoch)
+
+        # 6. Coherence
+        self.coherence = min(self.coherence + 0.001*dt, 1.0)
         if self.coherence > C_CRIT:
             self.state = "frozen"
 
-        # Star evolution
+        self._sph_ready = False
+
+        # 7. Star ageing
         if self.kind == "star":
             self.mass += 0.02
+            self.T     = min(self.T * 1.001, 1e5)
             if self.mass > 600:
-                self.supernova()
+                self._supernova()
 
-    def supernova(self):
-        self.kind = "particle"
-        self.mass *= 0.25
+    def _supernova(self):
+        self.kind   = "cloud"
+        self.mass  *= 0.25
         self.radius *= 0.4
-        self.el = np.random.choice(ELEMENTS[3:])
-        self.energy = 6.0
+        self.el     = np.random.choice(ELEMENTS[3:])
+        self.T      = TH_STAB * 10
+        self.N      = max(self.N // 4, 1)
 
 
-# --- white hole node (inversion) ---
-class WhiteHole(Body):
+# Keep 'Body' alias so old code (WhiteHole/BlackHole) still compiles
+Body = Cloud
+
+
+# ============================================================
+# GLOBAL SPH DENSITY PASS  (call once per step, before update)
+# ============================================================
+def sph_density_pass(world):
+    """
+    Vectorized density estimation for all Cloud bodies.
+    Sets c.rho, c.P, c.cs for every cloud in O(N·k) where k=avg neighbors.
+    """
+    global _current_epoch
+    clouds   = [b for b in world
+                if isinstance(b, Cloud) and b.kind not in ("whitehole","bh")]
+    if not clouds:
+        return
+
+    pos_arr  = np.array([c.pos  for c in clouds])
+    mass_arr = np.array([c.mass for c in clouds])
+
+    for i, ci in enumerate(clouds):
+        diff  = pos_arr - ci.pos
+        dist  = np.linalg.norm(diff, axis=1)
+        W     = _sph_kernel_w_vec(dist, SPH_H)
+        ci.rho        = max(float(np.dot(mass_arr, W)), 1e-6)
+        ci._sph_ready = True
+        ci.update_thermo(_current_epoch)
+
+
+# ============================================================
+# CLOUD MERGING & SPLITTING  (Jeans physics)
+# ============================================================
+def merge_clouds(world):
+    """
+    Merge overlapping diffuse clouds.  Conserves mass, momentum, thermal energy.
+    Stars and BHs are never consumed.
+    """
+    rem = set()
+    for ci in world:
+        if id(ci) in rem or ci.kind in ("bh","whitehole"):
+            continue
+        if not isinstance(ci, Cloud):
+            continue
+        nbs = spatial_hash.query_radius(ci.pos, (ci.radius + 2.0)*1.5)
+        for cj in nbs:
+            if cj is ci or id(cj) in rem:
+                continue
+            if not isinstance(cj, Cloud) or cj.kind in ("bh","whitehole","star"):
+                continue
+            # Don't merge immunity-window seeds
+            if getattr(ci,'_el_age',-1) < 0 or getattr(cj,'_el_age',-1) < 0:
+                continue
+            d = np.linalg.norm(ci.pos - cj.pos)
+            if d >= CLOUD_MERGE_FRAC*(ci.radius + cj.radius):
+                continue
+            mt = ci.mass + cj.mass
+            ci.vel = (ci.mass*ci.vel + cj.mass*cj.vel) / mt
+            ci.T   = (ci.mass*ci.T  + cj.mass*cj.T)  / mt
+            ci.pos = (ci.mass*ci.pos + cj.mass*cj.pos) / mt
+            ci.mass = mt
+            ci.N   += cj.N
+            ci.radius = (ci.radius**3 + cj.radius**3)**(1/3)
+            ep = {k: i for i, k in enumerate(ELEMENTS)}
+            if ep.get(cj.el,0) > ep.get(ci.el,0):
+                ci.el = cj.el
+            rem.add(id(cj))
+    world[:] = [b for b in world if id(b) not in rem]
+
+
+def split_cloud(world, epoch=0):
+    """
+    Fragment clouds that exceed the Jeans mass.
+    Two daughters get half the mass, conserving momentum + slight cooling.
+    """
+    new_clouds = []
+    for c in world:
+        if not isinstance(c, Cloud) or c.kind in ("bh","whitehole","star"):
+            continue
+        if c.mass < CLOUD_SPLIT_MASS:
+            continue
+        d = np.random.randn(3); d /= np.linalg.norm(d) + 1e-9
+        off = d * c.radius * 0.4
+        m2  = c.mass * 0.5
+        for sign in (+1, -1):
+            nc = Cloud(c.pos + sign*off, m2, c.radius*0.63,
+                       kind=c.kind, el=c.el,
+                       temperature=c.T*0.9, N=max(c.N//2,1))
+            nc.vel = c.vel + sign*d*0.1
+            new_clouds.append(nc)
+        c.mass = -1
+    world[:] = [b for b in world if b.mass > 0]
+    world.extend(new_clouds)
+
+
+def evaporate_small_clouds(world):
+    world[:] = [b for b in world
+                if not (isinstance(b, Cloud) and b.kind == "cloud"
+                        and b.mass < CLOUD_MIN_MASS)]
+
+
+# ============================================================
+# WHITE HOLE
+# ============================================================
+class WhiteHole(Cloud):
     def __init__(self, pos):
-        super().__init__(pos, 18000, 0.7, "whitehole", "nu")
+        super().__init__(pos, 18000, 0.7, "whitehole", "nu",
+                         temperature=FEED_ENERGY*10)
 
     def process(self, world):
         for b in world[:]:
+            if b is self:
+                continue
             d = np.linalg.norm(b.pos - self.pos)
-
-            # zone of repulsion
             if d < WHITE_RADIUS:
                 r = b.pos - self.pos
                 r /= np.linalg.norm(r) + 1e-6
-
-                # charge
-                b.energy += 5
+                b.T   += 5
                 b.vel += r * 0.4
-
-                # if black hole -> explosion
                 if b.kind == "bh":
-                    self.explode_bh(b, world)
-
-                # if not black hole -> revolution
+                    self._explode_bh(b, world)
                 else:
-                    self.revolution(b)
+                    self._revolution(b)
 
-    def explode_bh(self, bh, world):
-        for i in range(40):
-            p = Body(
-                bh.pos + np.random.randn(3) * 0.4,
-                30,
-                0.1,
-                "particle",
-                "nu"
-            )
-            p.vel = np.random.randn(3) * 0.6
-            p.energy = 20
+    def _explode_bh(self, bh, world):
+        for _ in range(40):
+            p = Cloud(bh.pos + np.random.randn(3)*0.4, 30, 0.15,
+                      "cloud", "nu", temperature=20, N=5)
+            p.vel = np.random.randn(3)*0.6
             world.append(p)
-
         if bh in world:
             world.remove(bh)
 
-    def revolution(self, b):
-        # return to the field
-        b.el = "nu"
-        b.kind = "particle"
-        b.energy = 15
-        b.mass = 40
-        b.radius = 0.1
+    def _revolution(self, b):
+        b.el = "nu"; b.kind = "cloud"
+        b.T  = 15;   b.mass = 40; b.radius = 0.2
+
+    # legacy method names
+    def explode_bh(self, bh, world): self._explode_bh(bh, world)
+    def revolution(self, b):         self._revolution(b)
 
 
-# --- condense ---
-def neutrino_condense(b):
-    if b.el == "nu" and b.mass > 400:
-        b.el = "H"
-        b.kind = "particle"
-        b.radius = 0.12
+# ============================================================
+# ASSEMBLY  —  epoch-aware chemistry on clouds
+# ============================================================
+def assemble(b, nodes=None, epoch=0):
+    """
+    Cloud chemistry driven by temperature T and SPH density rho.
+
+    Key fixes vs original:
+    - 'in_field' only resets to nu if cloud has NOT been in a field for
+      ASSEMBLY_GRACE_STEPS — prevents instant dissociation on field exit.
+    - Burnout thresholds are higher and gated by grace period: a freshly
+      formed electron won't vanish in the same step it appeared.
+    - non-nu clouds outside node radius drift until grace expires, not
+      instantly destroyed — models finite mean-free-path of radiation.
+    """
+    b._el_age += 1
+
+    if not nodes:
+        # decay back to nu only if grace period is over
+        if b.el != "nu" and b._el_age > ASSEMBLY_GRACE_STEPS.get(b.el, 5):
+            b.el = "nu"; b._el_age = 0
+        return
+
+    # Find nearest node and its strength
+    best_dist = 1e9; best_strength = 0.0
+    for n in nodes:
+        if not n.is_alive(): continue
+        d = np.linalg.norm(b.pos - n.pos)
+        if d < best_dist:
+            best_dist = d; best_strength = n.strength * n.life
+
+    # If cloud is inside a bubble with internal nodes, count those too
+    # This ensures chemistry works inside the bubble even if external nodes are far
+    from_bubble_node = (best_dist > NODE_RADIUS * 3 and best_strength > 0)
+
+    # NODE_RADIUS for nu clouds (must be attracted to nodes to assemble)
+    # but already-assembled clouds have a WIDER tolerance — they can
+    # survive further from nodes (Debye shielding / molecular binding)
+    el_tolerance = {"nu": 1.0, "e": 1.8, "p": 2.5, "H": 4.0,
+                    "He": 5.0, "C": 6.0, "O": 6.0, "Fe": 6.0}
+    effective_radius = NODE_RADIUS * el_tolerance.get(b.el, 1.0)
+
+    in_field = best_dist < effective_radius
+
+    if not in_field:
+        # Outside field: only light elements (e, p) decay back to nu
+        # Heavy elements (H+) are gravitationally/chemically stable
+        grace = ASSEMBLY_GRACE_STEPS.get(b.el, 5)
+        if b.el != "nu" and b._el_age > grace:
+            if b.el not in ("H","He","C","O","Fe","Ni","n"):
+                b.el = "nu"; b._el_age = 0
+        return
+
+    T   = b.T
+    rho = max(b.rho, 0.05)  # floor density so newly formed clouds aren't rate=0
+
+    # ── Burnout: dissociation only in epoch >= 1 and after grace period ──────
+    # In epoch 0 (QGP/Big Bang): everything is plasma, no burnout.
+    # Even in later epochs, H/He/heavy elements are stable — only e/p can
+    # dissociate back, and only when the cloud has cooled below a threshold.
+    grace = ASSEMBLY_GRACE_STEPS.get(b.el, 5)
+    if epoch >= 1 and b._el_age > grace and b._el_age >= 0:
+        # Electron dissociates only if T drops below formation threshold
+        # (i.e. no longer enough energy to maintain e state) — NOT if too hot
+        # Hot plasma just means more energetic electrons, not their destruction
+        if b.el == "e" and T < TH_NU_E * 0.5:    # too cold to stay as e
+            b.el = "nu"; b._el_age = 0; return
+        if b.el == "p" and T < TH_E_P * 0.5:      # too cold to stay as p
+            b.el = "e"; b._el_age = 0; return
+    # H can ionize at extreme temperatures (stellar interior)
+    if epoch >= 3 and b.el == "H" and T > TH_STAB * 20 and b._el_age > grace:
+        b.el = "p"; b.T *= 0.6; b._el_age = 0; return
+
+    # ── Progressive assembly ───────────────────────────────────────────────
+    # Threshold scaled by node strength: stronger nodes → lower effective
+    # barrier (like higher local photon / work density catalysing reactions)
+    strength_factor = min(best_strength / (NODE_STRENGTH_BASE * 3.5), 1.5)
+    eff_nu_e = TH_NU_E / strength_factor
+    eff_e_p  = TH_E_P  / strength_factor
+    eff_p_h  = TH_PN   / strength_factor
+
+    prev_el = b.el
+    # Sequential assembly — each 'if' can trigger in same call if T crosses
+    # multiple thresholds. This means nu→H can happen in one hot step.
+    if b.el == "nu" and T > eff_nu_e:  b.el = "e"
+    if b.el == "e"  and T > eff_e_p:   b.el = "p"
+    if b.el == "p"  and T > eff_p_h:   b.el = "H"
+    if b.el != prev_el:
+        b._el_age = 0
+
+    # Epoch 1: BBN nucleosynthesis — density-dependent H→He
+    # Three-body rate ∝ ρ²  →  more likely in dense clouds
+    if epoch >= 1 and b.el == "H" and T > TH_STAB * 0.8:
+        rate = 0.04 * min(rho / 100.0, 3.0)
+        if np.random.rand() < rate:
+            b.el = "He"; b.T *= 0.8
+
+    # Epoch 2: recombination — p + e⁻ → H  (density-enhanced)
+    if epoch >= 2 and b.el == "p" and T < TH_E_P * 1.5:
+        if np.random.rand() < 0.005 * (1 + rho / 50.0):
+            b.el = "H"
+
+    # Epoch 3+: stellar nucleosynthesis
+    if epoch >= 3 and b.kind == "star":
+        if   b.el == "He" and np.random.rand() < 0.01:  b.el = "C";  b.T *= 1.05
+        elif b.el == "C"  and np.random.rand() < 0.005: b.el = "O";  b.T *= 1.02
+        elif b.el == "O"  and np.random.rand() < 0.002: b.el = "Fe"
 
 
-# --- assmemly of particles ---
-def assemble(b):
-    E = b.energy
-
-    if b.el == "nu" and E > TH_NU_E:
-        b.el = "e"
-
-    if b.el == "e" and E > TH_E_P:
-        b.el = "p"
-
-    if b.el == "p" and E > TH_PN:
-        b.el = "H"
+# ============================================================
+# FUSION & COLLISION
+# ============================================================
+def fuse(c1, c2):
+    order = {k: i for i, k in enumerate(ELEMENTS)}
+    if order.get(c1.el, 0) < order.get(c2.el, 0):
+        idx = ELEMENTS.index(c1.el)
+        if idx < len(ELEMENTS)-1:
+            c1.el = ELEMENTS[idx+1]
+    c1.T *= 1.1
 
 
-# --- nuclear fusion ---
-def fuse(b1, b2):
-    if b1.el == "H": 
-        b1.el = "He"
-    elif b1.el == "He": 
-        b1.el = "C"
-    elif b1.el == "C": 
-        b1.el = "O"
-    elif b1.el == "O": 
-        b1.el = "Fe"
-
-
-# --- collision detection and fusion ---
-def collide(b1, b2):
-    d = np.linalg.norm(b1.pos - b2.pos)
-    if d < (b1.radius + b2.radius):
-        fuse(b1, b2)
-        b1.mass += b2.mass
+def collide(c1, c2):
+    d = np.linalg.norm(c1.pos - c2.pos)
+    if d < (c1.radius + c2.radius) * 0.6:
+        fuse(c1, c2)
+        mt    = c1.mass + c2.mass
+        c1.T  = (c1.T*c1.mass + c2.T*c2.mass) / max(mt,1e-6)
+        c1.vel= (c1.mass*c1.vel + c2.mass*c2.vel) / max(mt,1e-6)
+        c1.mass = mt; c1.N += c2.N
         return True
     return False
 
 
-# --- fueling the framework with a reservoir ---
+def collide_all_fast(world):
+    rem = set()
+    for b in world:
+        if id(b) in rem or b.kind in ("bh","whitehole"):
+            continue
+        nbs = spatial_hash.query_radius(b.pos, b.radius*2+0.5)
+        for o in nbs:
+            if o is b or id(o) in rem or o.kind in ("bh","whitehole"):
+                continue
+            if collide(b, o):
+                rem.add(id(o))
+    return [b for b in world if id(b) not in rem]
+
+
+# ============================================================
+# FRAMEWORK FEED
+# ============================================================
 def framework_feed(world):
     global _framework_reservoir
-
-    if not FRAMEWORK_FEED:
+    if not FRAMEWORK_FEED or _framework_reservoir <= 0:
         return
-
-    if _framework_reservoir <= 0:
-        return  # death of framework
-
-    # Decay of framework
     _framework_reservoir *= (1 - FRAMEWORK_DECAY)
-
     if np.random.rand() < FEED_RATE:
-        p = Body(
-            np.random.randn(3) * 6,
-            50,
-            0.12,
-            "particle",
-            "nu"
-        )
-        p.energy = FEED_ENERGY
-        world.append(p)
-
-        _framework_reservoir -= FEED_ENERGY * 10  # expense
+        for _ in range(FEED_PARTICLES_PER_TICK):
+            pos = np.random.randn(3) * (PHASE_WALL_R * 0.8)
+            c   = Cloud(pos, 50, 0.5, "cloud", "nu",
+                        temperature=FEED_ENERGY, N=10)
+            c.rho = 0.01
+            world.append(c)
+            _framework_reservoir -= FEED_ENERGY * 10
 
 
-# --- total material energy in the world ---
 def total_material_energy(world):
-    """Calculate total energy of all particles (excluding white hole)"""
-    return sum([b.energy for b in world if b.kind != "whitehole"])
+    return sum(b.T * b.mass for b in world if b.kind != "whitehole")
 
 
-# --- supernova explosion ---
+def get_framework_reservoir():
+    return _framework_reservoir
+
+
+# ============================================================
+# SUPERNOVA (standalone)
+# ============================================================
 def supernova(b, world):
     if b.mass > 800:
-        for i in range(20):
-            p = Body(
-                b.pos + np.random.randn(3) * 0.3,
-                30,
-                0.1,
-                "particle",
-                "H"
-            )
-            p.vel = np.random.randn(3) * 0.4
-            p.energy = 15
+        for _ in range(20):
+            p = Cloud(b.pos + np.random.randn(3)*0.3, 30, 0.3,
+                      "cloud", "H", temperature=b.T*15, N=3)
+            p.vel = np.random.randn(3)*0.4
             world.append(p)
-
-        b.mass *= 0.3
-        b.el = "Fe"
+        b.mass *= 0.3; b.el = "Fe"
 
 
-# --- black hole ---
-class BlackHole(Body):
+# ============================================================
+# BLACK HOLE
+# ============================================================
+class BlackHole(Cloud):
     def __init__(self, pos):
-        super().__init__(pos, 50000, 1.0, "bh", "bh")
+        super().__init__(pos, 50000, 1.0, "bh", "bh", temperature=0)
         self.inner_work = 0
         self.outer_work = 0
-        self.resource = 0
+        self.resource   = 0
 
     def accrete(self, b):
-        self.mass += b.mass
+        self.mass       += b.mass
         self.outer_work += b.work
-        self.energy += b.energy
+        self.T          += b.T * b.mass / max(self.mass, 1)
 
     def update_bh(self, world):
-        # Accelerated collapse - faster contraction
         self.inner_work += self.mass * COLLAPSE_SPEED
-
-        # Collapse mechanism
         if self.inner_work - self.outer_work > BH_COLLAPSE_W:
             self.resource += self.mass * 0.4
-            self.mass *= 0.7  # Faster collapse
-
-        # Explosion on high energy
-        if self.energy > BH_EXPLODE_E:
+            self.mass     *= 0.7
+        if self.T > BH_EXPLODE_E:
             explode_bh(self, world)
 
 
 def spawn_black_holes(world, white):
-    """Spawn black holes only at work density nodes
-    
-    Singularity forms ONLY if:
-    ρW > CRITICAL_WORK_DENSITY AND ∇W → maximum (gradient check)
-    """
     for b in world:
-        # Prohibit inside white hole zone
         if np.linalg.norm(b.pos - white.pos) < WHITE_RADIUS * 1.5:
             continue
-
-        # Calculate work density
-        rho = local_work_density(b, world)
-
-        # Calculate work gradient (velocity as proxy for local gradient)
+        rho  = local_work_density_fast(b)
         grad = np.linalg.norm(b.vel)
-
-        # Singularity criterion: high work density AND work gradient
         if rho > CRITICAL_WORK_DENSITY and grad > WORK_GRADIENT_MIN:
-            # Only spawn at high-density nodes
             world.append(BlackHole(b.pos.copy()))
             return
 
@@ -328,362 +782,643 @@ def spawn_black_holes(world, white):
 def merge_black_holes(world):
     bhs = [b for b in world if isinstance(b, BlackHole)]
     for i in range(len(bhs)):
-        for j in range(i + 1, len(bhs)):
-            d = np.linalg.norm(bhs[i].pos - bhs[j].pos)
-            if d < BH_MERGE_DIST:
+        for j in range(i+1, len(bhs)):
+            if np.linalg.norm(bhs[i].pos - bhs[j].pos) < BH_MERGE_DIST:
                 bhs[i].mass += bhs[j].mass
-                bhs[i].energy += bhs[j].energy
-                if bhs[j] in world:
-                    world.remove(bhs[j])
+                bhs[i].T    += bhs[j].T
+                if bhs[j] in world: world.remove(bhs[j])
                 return
 
 
 def explode_bh(bh, world):
-    for i in range(60):
-        p = Body(
-            bh.pos + np.random.randn(3),
-            30,
-            0.1,
-            "particle",
-            "nu"
-        )
-        p.energy = 20
+    for _ in range(60):
+        p = Cloud(bh.pos + np.random.randn(3), 30, 0.3,
+                  "cloud", "nu", temperature=20, N=5)
         p.vel = np.random.randn(3)
         world.append(p)
-
-    if bh in world:
-        world.remove(bh)
+    if bh in world: world.remove(bh)
 
 
-# Work nodes - structure generators
+# ============================================================
+# WORK NODE
+# ============================================================
 class WorkNode:
-    def __init__(self, pos, strength):
-        self.pos = np.array(pos, float)
-        self.strength = strength
+    def __init__(self, pos, strength, node_type="primary", origin="void"):
+        self.pos       = np.array(pos, float)
+        self.strength  = float(strength)
+        self.node_type = node_type
+        self.origin    = origin
+        self.life      = 1.0
+        self.age       = 0
+        self.work_accumulated = 0.0
+        self.energy    = 0.0
+        self._epoch    = 0          # updated externally each step
+        # Strong initial outward burst — radiation-pressure ionization front
+        outward = np.array(pos, float) / (np.linalg.norm(pos) + 1e-9)
+        speed   = NODE_DRIFT_BY_EPOCH[0] * 12.0
+        self.drift_vel = outward * speed + np.random.randn(3) * speed * 0.4
+
+    def update(self, local_work_density=0, dt=0.016):
+        self.age += 1
+        self.work_accumulated += local_work_density * dt
+        decay = {"primary":0.00001,"secondary":0.00003,
+                 "tertiary":0.0001, "exotic":0.0005}.get(self.node_type, 0.00003)
+        self.life -= decay
+        self.life  = max(self.life, 0.1 if self.node_type=="primary" else 0.05)
+        we = min(self.work_accumulated*0.00001, 0.5)
+        self.strength *= (1 + we*0.01)
+        drift_speed = NODE_DRIFT_BY_EPOCH.get(self._epoch, NODE_DRIFT)
+        # Damping: free-streaming in epoch 0-1, strong drag later
+        damp = 0.99 if self._epoch <= 1 else 0.92
+        self.drift_vel *= damp
+        self.drift_vel += np.random.randn(3) * drift_speed * 0.3
+        # clamp only in later epochs
+        if self._epoch >= 2:
+            spd = np.linalg.norm(self.drift_vel)
+            if spd > drift_speed * 2:
+                self.drift_vel *= drift_speed * 2 / spd
+        self.pos += self.drift_vel * dt
+
+    def is_alive(self):
+        return self.life > 0.01
+
+
+# ============================================================
+# WORK FIELD  —  vectorized
+# ============================================================
+def work_field_fast(b, nodes):
+    if not nodes: return np.zeros(3)
+    mods  = {"primary":1.0,"secondary":0.7,"tertiary":0.4,"exotic":1.5}
+    alive = [n for n in nodes if n.is_alive()]
+    if not alive: return np.zeros(3)
+    npos  = np.array([n.pos for n in alive])
+    rv    = npos - b.pos
+    dsq   = (rv*rv).sum(axis=1)
+    mask  = dsq <= NODE_RADIUS**2
+    if not mask.any(): return np.zeros(3)
+    rv    = rv[mask]; dsq = dsq[mask]+1e-12
+    am    = [n for n,m in zip(alive,mask) if m]
+    s     = np.array([n.strength*n.life*mods.get(n.node_type,1.0) for n in am])
+    return (s[:,None]*rv/dsq[:,None]).sum(axis=0)
 
 
 def work_field(b, nodes):
-    """Calculate work field force from nodes"""
-    F = np.zeros(3)
-    for n in nodes:
-        r = n.pos - b.pos
-        d = np.linalg.norm(r) + 1e-6
-        F += n.strength * r / (d**2)
-    return F
+    return work_field_fast(b, nodes)
 
 
-def local_work_density(b, world):
-    """Calculate local work density around body b
-    
-    ρW = dW/dt / V
-    where dW/dt is work per unit time and V is local volume
-    """
-    R = 2.0  # Local radius
-    local = [o for o in world
-             if np.linalg.norm(o.pos - b.pos) < R]
-
-    V = 4/3 * np.pi * R**3
-    dWdt = sum([o.work for o in local])
-
-    return dWdt / V if V > 0 else 0
+# ============================================================
+# LOCAL WORK DENSITY
+# ============================================================
+def local_work_density_fast(b, R=2.0):
+    nbs = spatial_hash.query_radius(b.pos, R)
+    V   = 4/3*np.pi*R**3
+    return sum(o.work for o in nbs) / V if V > 0 else 0
 
 
-# Multiverse bubbles
+def local_work_density(b, world, R=2.0):
+    return local_work_density_fast(b, R)
+
+
+# ============================================================
+# UNIVERSE BUBBLE
+# ============================================================
 class UniverseBubble:
     def __init__(self, center, btype="H"):
-        self.center = np.array(center)
-        self.radius = 3
-        self.energy = 100
-        self.type = btype
-        self.age = 0
+        self.center          = np.array(center, float)
+        self.radius          = 3.0
+        self.energy          = 100.0
+        self.type            = btype
+        self.age             = 0
+        self.dead            = False
+        self.has_first_stars   = False
+        self.galaxy_mass       = 0.0
+        self.star_count        = 0
+        self.peak_work_density = 0.0   # max work density ever seen inside
+        self.bh_id             = None  # id of galactic central BH (if any)
+        self.collapse_count    = 0     # how many collapse events happened
+        self.stability         = 1.0   # 1=stable, 0=dissolving
 
 
-def spawn_multiverse(bubbles, world):
-    """Spawn multiverse bubbles with energy and mass cost checks
-    
-    Requirements:
-    - Total material energy must exceed BUBBLE_MIN_ENERGY
-    - Enough particles to burn for BUBBLE_FORMATION_COST
-    - Randomly selects bubble type from BUBBLE_TYPES
+def find_node_clusters(nodes, cluster_radius=3.0):
+    if not nodes: return []
+    visited  = set()
+    clusters = []
+    for i, n1 in enumerate(nodes):
+        if i in visited or not n1.is_alive(): continue
+        members = [n1]; visited.add(i)
+        for j, n2 in enumerate(nodes):
+            if j in visited or not n2.is_alive(): continue
+            for m in members:
+                if np.linalg.norm(n2.pos-m.pos) < cluster_radius:
+                    members.append(n2); visited.add(j); break
+        if len(members) >= 2:
+            center = np.mean([n.pos for n in members], axis=0)
+            ts     = sum(n.strength*n.life for n in members)
+            clusters.append((center, len(members), ts))
+    return clusters
+
+
+MAX_BUBBLES = 12   # maximum simultaneous universe bubbles
+_last_bubble_step = -99  # cooldown tracker
+
+def spawn_multiverse(bubbles, world, nodes, step=0):
     """
-    if not FRAMEWORK_FEED:
-        return  # without framework feeding, no or few bubbles
+    Bubble formation via NODE FLYTHROUGH model.
+    A fast-moving node sweeping through a cloud cluster deposits work energy.
+    When node_strength * speed * nearby_clouds exceeds threshold -> bubble ignites.
+    This matches the observed: node flies into nu-cloud cluster, flashes, exits.
+    """
+    global _last_bubble_step
+    if not FRAMEWORK_FEED or not nodes: return
+    # Hard cap + cooldown: max 1 bubble per 8 steps, max MAX_BUBBLES total
+    active = [b for b in bubbles if not b.dead]
+    if len(active) >= MAX_BUBBLES: return
+    if step - _last_bubble_step < 8: return
+    clouds = [b for b in world if b.kind == "cloud"
+              and not isinstance(b, (WhiteHole, BlackHole))]
+    if len(clouds) < 2: return
 
-    E = total_material_energy(world)
+    for n in nodes:
+        if not n.is_alive(): continue
+        speed = np.linalg.norm(n.drift_vel)
+        if speed < 0.05: continue   # stationary nodes don't trigger
 
-    if E < BUBBLE_MIN_ENERGY:
-        return
+        # Nearby clouds within SPH kernel
+        nearby = [c for c in clouds if np.linalg.norm(c.pos - n.pos) < SPH_H * 1.5]
+        if len(nearby) < 2: continue
 
-    # expend mass from particles - collect particles to burn
-    burned = 0
-    
-    for b in world[:]:
-        if b.kind == "particle":
-            burned += b.mass
-            world.remove(b)
-            if burned >= BUBBLE_FORMATION_COST:
-                break
+        # Work = strength × speed × cloud_count (flythrough energy deposit)
+        work = n.strength * n.life * speed * len(nearby)
 
-    if burned < BUBBLE_FORMATION_COST:
-        return
+        # Ignition threshold scales with cost constant
+        if work < BUBBLE_FORMATION_COST: continue
 
-    # Random bubble type selection
-    btype = np.random.choice(list(BUBBLE_TYPES.keys()))
+        # Consume clouds (max 15% of total)
+        max_burn = max(2, int(len(clouds) * 0.15))
+        consumed = []
+        for c in sorted(nearby, key=lambda x: x.mass):
+            if len(consumed) >= max_burn: break
+            consumed.append(c)
+        for c in consumed:
+            if c in world: world.remove(c)
 
-    bubbles.append(
-        UniverseBubble(np.random.randn(3) * 15, btype)
-    )
+        # Bubble type: exotic if node is exotic/primary with high work
+        if n.node_type == "exotic" or work > BUBBLE_FORMATION_COST * 5:
+            btype = "exotic"
+        elif work > BUBBLE_FORMATION_COST * 2:
+            btype = "He"
+        else:
+            btype = "H"
+
+        em  = {"exotic": 2.0, "He": 1.5, "H": 1.0}[btype]
+        bub = UniverseBubble(n.pos.copy(), btype)
+        bub.energy = BUBBLE_TYPES[btype]["energy"] * em + work * 0.005
+        bub.radius = max(2.5, SPH_H)
+        bubbles.append(bub)
+        _last_bubble_step = step
+
+        # Seed bubble: 3 hot nu clouds + 4 internal work nodes
+        # (Big Bang: hot dense plasma + immediate field structure)
+        for _ in range(3):
+            seed_pos = n.pos + np.random.randn(3) * bub.radius * 0.3
+            seed = Cloud(seed_pos, mass=80, radius=0.6,
+                         kind="cloud", el="nu",
+                         temperature=FEED_ENERGY * 5, N=20)
+            seed._el_age = -20   # negative age = immunity window, won't merge away
+            world.append(seed)
+
+        # Place 4 internal nodes spread across bubble radius
+        for i in range(4):
+            angle = i * np.pi / 2
+            npos = n.pos + np.array([
+                np.cos(angle) * bub.radius * 0.4,
+                np.sin(angle) * bub.radius * 0.4,
+                np.random.randn() * bub.radius * 0.2
+            ])
+            internal = WorkNode(npos, NODE_STRENGTH_BASE * 2.0,
+                                node_type="secondary", origin="bubble_seed")
+            internal._epoch = _current_epoch
+            # Slow inward drift — sweep through bubble contents
+            internal.drift_vel = (n.pos - npos) / (np.linalg.norm(n.pos - npos) + 1e-9) * 0.05
+            nodes.append(internal)
+
+        # Node recoil after depositing work
+        n.drift_vel *= 0.2
+        return   # one bubble per step max
 
 
 def internal_nodes(bubbles, nodes):
-    """Generate internal work nodes inside universe bubbles
-    
-    - Bubble type determines node generation bias
-    - Nodes can burn out with NODE_BURN_RATE probability
-    - Track node age up to NODE_MAX_AGE
-    """
     for bub in bubbles:
         bub.age += 1
-
-        # Get bubble type bias (higher bias = more node generation)
-        bias = BUBBLE_TYPES[bub.type]["node_bias"]
-
-        # Generation of new nodes based on bubble type
-        if np.random.rand() < INTERNAL_NODE_RATE * bias:
-            # Random position inside bubble
-            p = bub.center + np.random.randn(3) * bub.radius
-            nodes.append(
-                WorkNode(p, INTERNAL_NODE_STRENGTH)
-            )
-
-    # Node burnout mechanism
+        cfg  = BUBBLE_TYPES.get(bub.type, BUBBLE_TYPES["H"])
+        if np.random.rand() < INTERNAL_NODE_RATE*cfg["node_bias"]:
+            dep = np.random.rand()
+            p   = bub.center + np.random.randn(3)*(bub.radius*dep*0.8)
+            if bub.type == "exotic":
+                nt = "exotic"; s = NODE_STRENGTH_BASE*1.5*(0.8+dep*0.4)
+            elif bub.type == "He":
+                nt = "secondary" if np.random.rand()<0.7 else "exotic"
+                s  = NODE_STRENGTH_BASE*1.2*(0.8+dep*0.2)
+            else:
+                nt = "secondary"; s = NODE_STRENGTH_BASE*(0.7+dep*0.3)
+            n = WorkNode(p, s, node_type=nt, origin=f"bubble_{bub.type}")
+            # Internal bubble nodes start with inward/random drift
+            # so they actively sweep through the bubble contents
+            n.drift_vel = np.random.randn(3) * 0.15
+            n._epoch = _current_epoch
+            nodes.append(n)
     for n in nodes[:]:
-        if np.random.rand() < NODE_BURN_RATE:
-            nodes.remove(n)
+        if not n.is_alive(): nodes.remove(n)
 
 
 def inside_any_bubble(pos, bubbles):
-    """Check if position is inside any bubble
-    
-    Returns bubble if inside, None otherwise
-    """
     for b in bubbles:
-        if np.linalg.norm(pos - b.center) < b.radius:
-            return b
+        if np.linalg.norm(pos-b.center) < b.radius: return b
     return None
 
 
-def star_formation(world, bubbles):
-    """Form stars from hydrogen inside bubbles
-    
-    H particles with mass > 300 inside bubbles become stars
-    """
+# ============================================================
+# EPOCH-SPECIFIC EVENTS
+# ============================================================
+
+def pop3_star_formation(world, bubbles, nodes, epoch):
+    """Pop III: first massive metal-free stars near any work node."""
+    if epoch < 3: return
     for b in world:
-        bub = inside_any_bubble(b.pos, bubbles)
-        if not bub: 
-            continue
+        if b.el != "H" or b.kind == "star": continue
+        near_node = any(np.linalg.norm(b.pos - n.pos) < NODE_RADIUS * 4
+                        for n in nodes if n.is_alive())
+        if not near_node: continue
+        if b.mass > 40 and b.rho > 0.01:
+            b.kind = "star"; b.radius = 0.6
+            b.mass *= 1.5;   b.T = TH_STAB * 5
+            bub = inside_any_bubble(b.pos, bubbles)
+            if bub: bub.has_first_stars = True
+            break
 
-        if b.el == "H" and b.mass > 300:
-            b.kind = "star"
-            b.radius = 0.4
 
-
-def universe_feedback(bubbles, world):
-    """Apply work-based energy feedback from universe bubbles
-    
-    Local work in bubble volume feeds back as energy:
-    E_bubble += W_local * UNIVERSE_WORK_FEEDBACK
+def star_formation(world, bubbles, nodes, epoch=0):
+    """Stars form near work nodes (dark matter halos).
+    Dominant nodes have lower Jeans threshold — deeper potential well.
     """
+    dominant  = [n for n in nodes if n.node_type=="primary" and n.is_alive()]
+    satellite = [n for n in nodes if n.node_type!="primary" and n.is_alive()]
+
+    for b in world:
+        if b.el != "H" or b.kind == "star": continue
+
+        # Check nearest dominant node
+        d_dom = min((np.linalg.norm(b.pos-n.pos) for n in dominant), default=999)
+        d_sat = min((np.linalg.norm(b.pos-n.pos) for n in satellite), default=999)
+
+        near_dominant  = d_dom < NODE_RADIUS * 4   # wide capture radius
+        near_satellite = d_sat < NODE_RADIUS * 2
+
+        if not (near_dominant or near_satellite): continue
+
+        # Dominant node: lower mass + density threshold (deep halo potential)
+        if near_dominant:
+            jeans_ok = b.mass > 40 and b.rho > 0.01 and b.T < TH_STAB * 12
+        else:
+            jeans_ok = b.mass > 60 and b.rho > 0.02 and b.T < TH_STAB * 8
+
+        if jeans_ok:
+            b.kind   = "star"
+            b.radius = 0.4
+            b.T      = max(b.T, TH_STAB * 2)
+
+    if epoch >= 3:
+        pop3_star_formation(world, bubbles, nodes, epoch)
+
+
+def reionization_feedback(world, bubbles, epoch):
+    if epoch < 4: return
+    stars = [b for b in world if b.kind == "star"]
+    for star in stars:
+        nbs = spatial_hash.query_radius(star.pos, 4.0)
+        for o in nbs:
+            if o is star: continue
+            if o.el in ("H","He"):
+                # UV photon energy deposit scales with star T
+                dT = 1.5 * star.T / max(star.mass, 1)
+                o.T = min(o.T + dT, star.T*0.5)
+                if o.el == "H" and o.T > TH_E_P*2:
+                    o.el = "p"   # photo-ionization
+
+
+def galaxy_formation(world, bubbles, nodes, epoch, step=0):
+    """
+    Galaxy assembly, stability tracking, and collapse detection.
+
+    Collapse types observed:
+    - peak_work_density approaches 120 (CRITICAL_WORK_DENSITY) → galactic BH
+    - galaxy dissolves WITHOUT peak → direct collapse / tidal disruption
+    """
+    if epoch < 5: return
     for bub in bubbles:
-        # Collect particles inside this bubble
+        if bub.dead: continue
+
+        # Stars inside this bubble OR within 6 units of bubble center
+        # (galaxy extends beyond the formal bubble boundary)
+        ls = [b for b in world if b.kind == "star"
+              and np.linalg.norm(b.pos - bub.center) < max(bub.radius, 6.0)]
+        prev_count      = bub.star_count
+        bub.star_count  = len(ls)
+        bub.galaxy_mass = sum(b.mass for b in ls)
+
+        # Track peak work density inside bubble
+        local_clouds = [b for b in world
+                        if not isinstance(b, (WhiteHole, BlackHole))
+                        and np.linalg.norm(b.pos - bub.center) < bub.radius]
+        if local_clouds:
+            wd = max(local_work_density_fast(b) for b in local_clouds)
+            if wd > bub.peak_work_density:
+                bub.peak_work_density = wd
+
+        # ── Stability: galaxy is stable if star count doesn't drop fast ──
+        if bub.star_count >= 3:
+            bub.stability = min(1.0, bub.stability + 0.01)
+            bub.radius   += 0.005
+            bub.energy   += 2.0
+
+            # Gravitational binding: pull stars toward bubble center
+            for star in ls:
+                direction = bub.center - star.pos
+                d = np.linalg.norm(direction)
+                if d > 0.1:
+                    star.vel += direction / d * 0.005 * bub.stability
+
+        elif bub.star_count < prev_count and prev_count >= 3:
+            # Galaxy is losing stars — destabilising
+            bub.stability = max(0.0, bub.stability - 0.05)
+            star_loss = prev_count - bub.star_count
+
+            # ── COLLAPSE DETECTION ─────────────────────────────────────
+            if bub.peak_work_density >= CRITICAL_WORK_DENSITY * 0.6:
+                # Significant work density peak → galactic central BH formed
+                # (even if it briefly dipped, the peak tells us what happened)
+                bh = BlackHole(bub.center.copy())
+                bh.mass = bub.galaxy_mass * 0.1   # BH is ~10% of galaxy mass
+                world.append(bh)
+                bub.bh_id = id(bh)
+                log_collapse(step, "galactic_bh", bub.center,
+                             bh.mass, bub.peak_work_density, prev_count)
+                bub.collapse_count += 1
+                bub.peak_work_density = 0.0   # reset for next cycle
+            elif star_loss >= 2:
+                # Galaxy dissolves without BH — direct collapse / tidal disruption
+                log_collapse(step, "direct_collapse", bub.center,
+                             bub.galaxy_mass, bub.peak_work_density, prev_count)
+                bub.collapse_count += 1
+                bub.peak_work_density = 0.0
+
+        # ── Cosmic Noon: enhanced star formation ──
+        if epoch >= 6 and np.random.rand() < 0.003:
+            pos = bub.center + np.random.randn(3) * bub.radius * 0.5
+            nodes.append(WorkNode(pos, NODE_STRENGTH_BASE * 2.0,
+                                  node_type="primary", origin="cosmic_noon"))
+
+        # ── AGN flare: existing BH accretes and flares ────────────────
+        if bub.bh_id is not None:
+            bhs = [b for b in world if isinstance(b, BlackHole)
+                   and id(b) == bub.bh_id]
+            if bhs:
+                central_bh = bhs[0]
+                if central_bh.T > BH_EXPLODE_E * 0.7:
+                    log_collapse(step, "agn_flare", central_bh.pos,
+                                 central_bh.mass, central_bh.T, bub.star_count)
+
+
+def cosmic_epoch_events(world, bubbles, nodes, iteration):
+    global _current_epoch
+    epoch = get_current_epoch(iteration)
+    _current_epoch = epoch
+
+    if epoch >= 2:
+        for b in world:
+            if isinstance(b, Cloud) and b.el == "p" and b.T < TH_E_P:
+                if np.random.rand() < 0.005*(1 + b.rho/30.0):
+                    b.el = "H"
+
+    star_formation(world, bubbles, nodes, epoch)
+    reionization_feedback(world, bubbles, epoch)
+    galaxy_formation(world, bubbles, nodes, epoch, step=iteration)
+    return epoch
+
+
+# ============================================================
+# UNIVERSE FEEDBACK
+# ============================================================
+def universe_feedback(bubbles, world):
+    for bub in bubbles:
+        if bub.dead: continue
         local = [b for b in world
                  if np.linalg.norm(b.pos - bub.center) < bub.radius]
-
-        # Sum local work
-        W = sum([b.work for b in local])
-
-        # Apply feedback
+        W = sum(b.work for b in local)
         bub.energy += W * UNIVERSE_WORK_FEEDBACK
+        # Bubble radiates energy into internal clouds, heating them
+        # This enables chemistry: cold nu clouds inside get heated to TH_NU_E
+        if local and bub.energy > 10:
+            heat = min(bub.energy * 0.001, 5.0) / len(local)
+            for b in local:
+                b.T = max(b.T, b.T + heat)
 
 
 def interact_universes(bubbles, world):
     for b in bubbles:
+        if b.dead: continue
         for o in world:
+            if isinstance(o, (WhiteHole, BlackHole)): continue
             d = np.linalg.norm(o.pos - b.center)
             if d < b.radius:
-                o.energy += 2
-                o.vel += (o.pos - b.center) * 0.02
+                o.T   += 1.0
+                o.vel += (o.pos - b.center) * 0.005
+            elif d < b.radius * 2.5:
+                direction = (b.center - o.pos) / (d + 1e-9)
+                strength  = 0.02 * (b.radius / max(d, 0.1)) ** 2
+                o.vel    += direction * strength
 
 
-# Phase walls - reflection at boundary
+def node_gravity(world, nodes):
+    """Dominant nodes act as dark matter halos — gravitationally attract
+    nearby H/He/star clouds.  This concentrates matter for galaxy formation.
+    Stronger than bubble attraction and epoch-independent."""
+    dominant = [n for n in nodes
+                if n.node_type == "primary" and n.is_alive()]
+    if not dominant: return
+
+    for o in world:
+        if isinstance(o, (WhiteHole, BlackHole)): continue
+        if o.kind == "cloud" and o.el not in ("H","He","C","O","Fe","e","p"):
+            continue   # only attract assembled matter + stars
+
+        for dom in dominant:
+            r_vec = dom.pos - o.pos
+            d     = np.linalg.norm(r_vec) + 1e-9
+            if d > 12.0: continue   # limited range
+
+            # Gravitational pull ∝ strength / d²
+            pull = dom.strength / NODE_STRENGTH_BASE * 0.008 / (d * d)
+            pull = min(pull, 0.05)   # cap
+            o.vel += r_vec / d * pull
+
+            # Bonus: H clouds very close to dominant node get mass boost
+            # (gas accretes onto proto-galactic halo)
+            if o.el == "H" and d < NODE_RADIUS * 2:
+                o.mass   = min(o.mass * 1.002, CLOUD_SPLIT_MASS * 0.8)
+                o.radius = (o.mass / (4/3*np.pi)) ** (1/3) * 0.1
+
+
 def phase_walls(b):
-    d = np.linalg.norm(b.pos)
-    if d > PHASE_WALL_R:
+    if np.linalg.norm(b.pos) > PHASE_WALL_R:
         b.vel *= -0.6
 
 
-# Space decay - removal at far distance
 def space_decay(world):
-    for b in world[:]:
-        d = np.linalg.norm(b.pos)
-        if d > SPACE_DECAY_R:
-            world.remove(b)
+    world[:] = [b for b in world if np.linalg.norm(b.pos) <= SPACE_DECAY_R]
 
 
-# --- spiral ---
-def make_spiral(center):
-    out = []
-    for a in range(3):
-        for i in range(25):
-            r = i * 0.25
-            th = i * 0.5 + a * 2 * np.pi / 3
-            p = center + np.array([r*np.cos(th), r*np.sin(th), 0])
-            out.append(Body(p, 300, 0.4, "star", "H"))
-    return out
+# ============================================================
+# UNIVERSE EVOLUTION
+# ============================================================
+def universe_evolution(bubbles, world, nodes):
+    for u in bubbles:
+        u.age += 1
+        matter = [b for b in world if np.linalg.norm(b.pos-u.center) < u.radius]
+        work   = sum(b.work for b in matter)*0.002
+        u.energy -= work + 0.02*u.radius
+        if u.energy > 80: u.radius += 0.001
+        else:             u.radius *= 0.999
+        if u.energy < 5:  u.dead = True
 
 
-# --- world creation ---
+def decay_dead_universe(u, nodes):
+    if not getattr(u,'dead',False): return
+    dr = {"primary":0.97,"secondary":0.95,"tertiary":0.92,"exotic":0.85}
+    for n in nodes[:]:
+        if np.linalg.norm(n.pos-u.center) < u.radius:
+            n.life *= dr.get(n.node_type,0.95)
+            if n.life < 0.01: nodes.remove(n)
+
+
+def node_interactions_in_bubbles(bubbles, nodes):
+    """Node interactions: dominant nodes repel each other (halo exclusion),
+    satellites get absorbed by nearest dominant (hierarchical clustering)."""
+    dominant  = [n for n in nodes if n.node_type == "primary" and n.is_alive()]
+    satellite = [n for n in nodes if n.node_type != "primary" and n.is_alive()]
+
+    # Dominant ↔ dominant: strong repulsion — halos don't overlap
+    for i, n1 in enumerate(dominant):
+        for n2 in dominant[i+1:]:
+            r_vec = n1.pos - n2.pos
+            d     = np.linalg.norm(r_vec) + 1e-9
+            if d < 8.0:   # exclusion radius between dominant nodes
+                push = r_vec / d * (8.0 - d) * 0.005
+                n1.drift_vel += push
+                n2.drift_vel -= push
+
+    # Satellite → dominant: absorbed if very close, else weak attraction
+    for sat in satellite[:]:
+        if not sat.is_alive(): continue
+        dists = [(np.linalg.norm(sat.pos - dom.pos), dom) for dom in dominant]
+        if not dists: continue
+        d_min, nearest = min(dists, key=lambda x: x[0])
+        if d_min < NODE_RADIUS:
+            # Absorption: dominant gets stronger, satellite fades
+            nearest.strength = min(nearest.strength * 1.002,
+                                   NODE_STRENGTH_BASE * 12.0)
+            sat.life *= 0.97
+        elif d_min < 5.0:
+            # Weak gravitational pull toward dominant
+            direction = (nearest.pos - sat.pos) / (d_min + 1e-9)
+            sat.drift_vel += direction * 0.002
+
+    # Within bubbles: light exchange between same-type nodes
+    for u in bubbles:
+        bn = [n for n in nodes if np.linalg.norm(n.pos-u.center) < u.radius]
+        for i, n1 in enumerate(bn):
+            for n2 in bn[i+1:]:
+                if n1.node_type == n2.node_type == "secondary":
+                    d = np.linalg.norm(n1.pos - n2.pos)
+                    if d < NODE_RADIUS * 0.5:
+                        ex = min(n1.strength, n2.strength) * 0.001
+                        n1.strength += ex; n2.strength += ex
+
+
+# ============================================================
+# NODES UPDATE
+# ============================================================
+def update_nodes(nodes, world=None, epoch=0):
+    dead = []
+    for n in nodes:
+        n._epoch = epoch          # inject current epoch for drift scaling
+        lw = 0
+        if world and spatial_hash.grid:
+            nb = spatial_hash.query_radius(n.pos, NODE_RADIUS)
+            lw = sum(b.work for b in nb)/(len(nb)+1)
+        n.update(local_work_density=lw, dt=0.016)
+        if not n.is_alive(): dead.append(n)
+    for n in dead:
+        if n in nodes: nodes.remove(n)
+
+
+# ============================================================
+# BH ACCRETION
+# ============================================================
+def accretion_fast(world):
+    bhs      = [b for b in world if isinstance(b, BlackHole)]
+    to_remove = set()
+    for bh in bhs:
+        nbs = spatial_hash.query_radius(bh.pos, bh.radius*2)
+        for o in nbs:
+            if o is bh or id(o) in to_remove: continue
+            if np.linalg.norm(o.pos-bh.pos) < bh.radius:
+                bh.accrete(o); to_remove.add(id(o))
+    world[:] = [b for b in world if id(b) not in to_remove]
+
+
+# ============================================================
+# WORLD CREATION
+# ============================================================
+# Number of dominant proto-galactic nodes (= max galaxy seeds)
+N_DOMINANT_NODES = 4
+
 def create_universe():
     w = []
-
-    # Neutrino field
-    for i in range(200):
-        w.append(
-            Body(np.random.randn(3) * 8, 40, 0.08, "particle", "nu")
-        )
+    # 240 hot neutrino clouds — enough for guaranteed universe formation
+    for _ in range(240):
+        pos = np.random.randn(3) * 8
+        c   = Cloud(pos, mass=50, radius=0.5,
+                    kind="cloud", el="nu",
+                    temperature=FEED_ENERGY, N=10)
+        w.append(c)
 
     white = WhiteHole([0, 0, 0])
     w.append(white)
 
-    # Initialize work nodes (future galaxy nodes)
-    nodes = [
-        WorkNode(np.array([-5.0, 0.0, 0.0]), 50.0),
-        WorkNode(np.array([5.0, 0.0, 0.0]), 50.0),
-        WorkNode(np.array([0.0, 4.0, 0.0]), 30.0),
-    ]
+    nodes = []
+
+    # ── Dominant nodes: strong, placed at r≈1, will become galaxy cores ──
+    # They start close but get a strong OUTWARD kick → quickly separate
+    # to different regions of space, each becoming a proto-galactic halo
+    for i in range(N_DOMINANT_NODES):
+        angle  = 2 * np.pi * i / N_DOMINANT_NODES
+        r      = 0.8
+        pos    = np.array([r*np.cos(angle), r*np.sin(angle), 0.0])
+        n      = WorkNode(pos, NODE_STRENGTH_BASE * 6.0,   # 6× stronger
+                          node_type="primary", origin="dominant")
+        # Strong outward kick — each dominant node flies to a different quadrant
+        outward = pos / (np.linalg.norm(pos) + 1e-9)
+        n.drift_vel = outward * NODE_DRIFT_BY_EPOCH[0] * 15.0
+        nodes.append(n)
+
+    # ── Satellite nodes: weaker, random directions, faster decay ──────────
+    # They seed local structure but don't compete with dominant nodes
+    for _ in range(8):
+        pos = np.random.randn(3) * 0.3
+        n   = WorkNode(pos, NODE_STRENGTH_BASE * 1.5,
+                       node_type="secondary", origin="satellite")
+        n.drift_vel = np.random.randn(3) * NODE_DRIFT_BY_EPOCH[0] * 8.0
+        nodes.append(n)
 
     return w, white, nodes
-
-
-def update_nodes(nodes):
-    """Update work nodes - drift and degradation
-    
-    Nodes slowly drift through space with NODE_DRIFT velocity
-    Life degrades very slowly (0..1 scale)
-    Minimum life of 0.2 prevents complete death
-    """
-    for n in nodes:
-        # Random drift movement
-        n.vel = np.random.randn(3) * NODE_DRIFT
-        n.pos += n.vel
-        
-        # Very slow degradation
-        if not hasattr(n, 'life'):
-            n.life = 1.0
-        
-        n.life -= 0.00002  # very slow decay
-        n.life = max(n.life, 0.2)  # prevent complete death
-
-
-def work_field_from_nodes(b, nodes):
-    """Calculate enhanced work field force from all nodes
-    
-    Each node contributes a force based on:
-    - Node life (degradation factor)
-    - Node strength
-    - Distance-dependent falloff (1/d^2)
-    - NODE_RADIUS limits sphere of influence
-    """
-    F = np.zeros(3)
-    for n in nodes:
-        r = n.pos - b.pos
-        d = np.linalg.norm(r)
-        
-        # Only influence within NODE_RADIUS
-        if d < NODE_RADIUS:
-            # Avoid singularity with epsilon
-            life = n.life if hasattr(n, 'life') else 1.0
-            F += life * n.strength * r / (d**2 + 1e-6)
-    
-    return F
-
-
-def spawn_internal_nodes(bubbles, nodes):
-    """Spawn internal work nodes inside universe bubbles
-    
-    Node generation rate depends on bubble type:
-    - H: 0.002 rate (slow)
-    - He: 0.006 rate (moderate)
-    - exotic: 0.01 rate (fast)
-    
-    Each bubble spawns nodes within its radius
-    """
-    for u in bubbles:
-        u_type = u.type if hasattr(u, 'type') else "H"
-        
-        cfg = BUBBLE_TYPES.get(u_type, BUBBLE_TYPES["H"])
-        if np.random.rand() < cfg["node_rate"]:
-            # Random position inside bubble
-            pos = u.center + np.random.randn(3) * (u.radius * 0.6)
-            
-            # Create new node with base strength
-            new_node = WorkNode(pos, NODE_STRENGTH_BASE * 0.8)
-            new_node.life = 1.0  # Initialize life
-            nodes.append(new_node)
-
-
-def universe_evolution(bubbles, world, nodes):
-    """Evolve universe bubbles through work and thermodynamics
-    
-    Processes for each bubble:
-    1. Age increment
-    2. Energy consumption from local work
-    3. Thermal heat loss (leakage)
-    4. Radius growth/contraction based on energy
-    5. Heat death transition
-    """
-    for u in bubbles:
-        u.age += 1
-        
-        # Find all particles inside this bubble
-        matter = [b for b in world
-                  if np.linalg.norm(b.pos - u.center) < u.radius]
-        
-        # Energy consumption from work done by matter
-        work = sum(b.work for b in matter) * 0.002
-        u.energy -= work
-        
-        # Thermal leakage proportional to surface area
-        u.energy -= 0.02 * u.radius
-        
-        # Dynamic radius adjustment based on energy
-        if u.energy > 80:
-            u.radius += 0.001  # expansion
-        else:
-            u.radius *= 0.999  # contraction
-        
-        # Heat death check
-        if u.energy < 5:
-            u.dead = True
-
-
-def decay_dead_universe(u, nodes):
-    """Decay work nodes inside dead universe
-    
-    When universe bubble dies:
-    - All work nodes inside gradually lose life
-    - Node life decreases by 5% per update
-    - Eventually nodes fade away
-    """
-    if not hasattr(u, 'dead') or not u.dead:
-        return
-    
-    for n in nodes[:]:
-        if np.linalg.norm(n.pos - u.center) < u.radius:
-            if not hasattr(n, 'life'):
-                n.life = 1.0
-            n.life *= 0.95  # gradual decay
-            
-            # Remove completely dead nodes
-            if n.life < 0.01:
-                nodes.remove(n)

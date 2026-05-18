@@ -1,7 +1,20 @@
 import streamlit as st
 import json
 import matplotlib.pyplot as plt
-from wtf_model import *
+from wtf_model import (
+    create_universe, framework_feed, spatial_hash, sph_density_pass,
+    assemble, accretion_fast, collide_all_fast,
+    merge_clouds, split_cloud, evaporate_small_clouds,
+    merge_black_holes, spawn_black_holes,
+    spawn_multiverse, internal_nodes, update_nodes,
+    node_interactions_in_bubbles, universe_evolution, decay_dead_universe,
+    cosmic_epoch_events, universe_feedback, interact_universes,
+    space_decay, phase_walls, get_current_epoch, get_epoch_info,
+    total_material_energy, get_framework_reservoir, local_work_density_fast,
+    WhiteHole, BlackHole, Cloud,
+    FRAMEWORK_RESERVOIR, CRITICAL_WORK_DENSITY, COSMIC_EPOCHS,
+    COLLAPSE_LOG, log_collapse, node_gravity,
+)
 import numpy as np
 import time
 import pickle
@@ -10,25 +23,23 @@ from datetime import datetime
 st.set_page_config(layout="wide")
 st.title("🌌 WTF – Universe with Work Density Singularity")
 
-# ============== SIDEBAR CONTROLS ==============
+# ═══════════════════════════════════════════════════════════════
+#  SIDEBAR CONTROLS — simulation parameters & visualization options
+# ═══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("### ⚙️ Simulation Controls")
-    
     col1, col2 = st.columns(2)
     with col1:
         dt = st.slider("dt", 0.01, 0.3, 0.05)
     with col2:
         speed = st.slider("Speed", 1, 40, 12)
-    
-    # Advanced controls
+
     st.markdown("---")
     st.markdown("### 🎮 Advanced Options")
-    
     live_mode = st.toggle("🔴 Live Mode", False)
     if live_mode:
         live_fps = st.slider("Updates/sec", 1, 30, 10)
-    
-    # Batch processing
+
     batch_mode = st.toggle("📦 Batch Mode", False)
     if batch_mode:
         batch_size = st.slider("Batch Size", 10, 500, 100, step=10)
@@ -39,17 +50,16 @@ with st.sidebar:
                 ["Max work density reached", "Black holes > N", "Bubbles spawned"]
             )
             stop_threshold = st.number_input("Threshold value", 0, 1000, 500)
-    
-    # Visualization options
+
     st.markdown("---")
     st.markdown("### 📊 Visualization")
-    show_3d = st.toggle("Show 3D View", True)
-    show_tree = st.toggle("Show State Tree", True)
+    # Toggles for visualization components
+    show_3d    = st.toggle("Show 3D View", True)
+    show_tree  = st.toggle("Show State Tree", True)
     show_history = st.toggle("Show History Graphs", True)
-    
-    # Save/Load
+
     st.markdown("---")
-    st.markdown("### 💾 Persistence")
+    st.markdown("### 💾 Persistence & Snapshots")
     col1, col2 = st.columns(2)
     with col1:
         if st.button("💾 Save State"):
@@ -66,7 +76,6 @@ with st.sidebar:
             with open(filename, "wb") as f:
                 pickle.dump(snapshot, f)
             st.success(f"✅ Saved to {filename}")
-    
     with col2:
         if st.button("📂 Load State"):
             try:
@@ -81,7 +90,10 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Error loading: {e}")
 
-# ============== SESSION STATE INITIALIZATION ==============
+
+# ═══════════════════════════════════════════════════════════════
+#  SESSION STATE — persistent storage across reruns
+# ═══════════════════════════════════════════════════════════════
 if "world" not in st.session_state:
     w, white, nodes = create_universe()
     st.session_state.world = w
@@ -96,101 +108,165 @@ if "world" not in st.session_state:
     st.session_state.bh_history = []
     st.session_state.performance_metrics = {}
     st.session_state.stop_flag = False
+    st.session_state.reservoir_history = []
+    st.session_state.node_stats_history = []
+    st.session_state.epoch_history = []        # NEW: epoch per iteration
+    st.session_state.galaxy_count_history = [] # NEW
+    st.session_state.star_count_history   = []
+    st.session_state.collapse_history     = []   # collapse events
 
-# ============== STEP FUNCTION WITH METRICS ==============
+
+# ═══════════════════════════════════════════════════════════════
+#  STEP FUNCTION — core simulation loop with physics sequence
+# ═══════════════════════════════════════════════════════════════
 def step():
-    w = st.session_state.world
-    white = st.session_state.white
+    w      = st.session_state.world
+    white  = st.session_state.white
     bubbles = st.session_state.bubbles
-    nodes = st.session_state.nodes
+    nodes  = st.session_state.nodes
+    iteration = st.session_state.iteration
 
     start_time = time.time()
 
+    # Rebuild spatial hash once per step for O(1) neighbor lookups
+    spatial_hash.build(w)
+
+    # Inject new neutrino clouds from framework reservoir
     framework_feed(w)
+    # White hole processes nearby clouds (ejection, heating)
     white.process(w)
 
-    # Bodies update with work field
-    for b in w[:]:  # Iterate over copy
-        if isinstance(b, WhiteHole): 
-            continue
+    # Compute SPH density and thermodynamics for all clouds
+    epoch = get_current_epoch(iteration)
+    sph_density_pass(w)  # Sets ρ, P, c_s for each cloud
 
+    # Update cloud dynamics: SPH forces, Hubble expansion, cooling
+    for b in w[:]:
+        if isinstance(b, WhiteHole):
+            continue  # White hole handled separately
         if isinstance(b, BlackHole):
-            b.update_bh(w)
+            b.update_bh(w)  # Black hole accretion & explosion check
         else:
-            b.update(w, dt, nodes)
-            assemble(b)
-            phase_walls(b)
+            b.update(w, dt, nodes, use_spatial=True, epoch=epoch)  # SPH dynamics
+            phase_walls(b)  # Boundary conditions
 
-    # Accretion
-    for bh in [x for x in w if isinstance(x, BlackHole)]:
-        for o in w[:]:
-            if o is bh: 
-                continue
-            if np.linalg.norm(o.pos - bh.pos) < bh.radius:
-                bh.accrete(o)
-                if o in w: 
-                    w.remove(o)
+    # Epoch-aware chemistry: nu→e→p→H→He→... transitions
+    for b in w:
+        if not isinstance(b, (WhiteHole, BlackHole)):
+            assemble(b, nodes, epoch=epoch)
 
-    # Collisions - use list copy to avoid index issues
-    w_copy = w[:]  # Create copy for iteration
-    rem = []
-    for i in range(len(w_copy)):
-        for j in range(i + 1, len(w_copy)):
-            if collide(w_copy[i], w_copy[j]):
-                rem.append(w_copy[j])
-    for r in rem:
-        if r in w: 
-            w.remove(r)
+    # Black hole accretion of nearby clouds
+    accretion_fast(w)
 
+    # Cloud-cloud collisions and fusion reactions
+    w[:] = collide_all_fast(w)
+
+    # Merge overlapping clouds (momentum & mass conservation)
+    merge_clouds(w)
+
+    # Jeans instability: fragment massive clouds into smaller pieces
+    split_cloud(w, epoch=epoch)
+
+    # Remove evaporated clouds (below CLOUD_MIN_MASS threshold)
+    evaporate_small_clouds(w)
+
+    # Merge nearby black holes
     merge_black_holes(w)
+    # Spawn new black holes where work density exceeds critical threshold
     spawn_black_holes(w, white)
-    
-    # Multiverse bubble spawning with thermodynamic cost
-    spawn_multiverse(bubbles, w)
-    
-    # Generate internal nodes in bubbles
+
+    # UNIVERSE BUBBLES: multiverse mechanics
+    # Create new universe bubbles via node flythrough ignition
+    spawn_multiverse(bubbles, w, nodes, step=iteration)
+    # Seed new work nodes inside existing bubbles
     internal_nodes(bubbles, nodes)
-    
-    # Star formation inside bubbles
-    star_formation(w, bubbles)
-    
-    # Universe feedback - work-based energy flow
+    # Update node positions (drift) and decay
+    update_nodes(nodes, w, epoch=epoch)
+    # Node interactions: dominant repulsion, satellite absorption
+    node_interactions_in_bubbles(bubbles, nodes)
+    # Bubble radius & energy evolution
+    universe_evolution(bubbles, w, nodes)
+
+    # Clean up dead/empty bubbles
+    for u in bubbles:
+        decay_dead_universe(u, nodes)
+
+    # Epoch-specific events: recombination, star formation, galaxy assembly
+    current_epoch = cosmic_epoch_events(w, bubbles, nodes, iteration)
+
+    # Bubble feedback heating of internal clouds
     universe_feedback(bubbles, w)
-    
+    # Bubble gravity attraction on nearby clouds
     interact_universes(bubbles, w)
+    # Work nodes gravity on assembled matter
+    node_gravity(w, nodes)
+    # Boundary condition: space decay at edges
     space_decay(w)
 
-    # Metrics collection
-    total_work = sum([b.work for b in w if hasattr(b, "work")])
+    # ─── METRICS COLLECTION ───
+    # Total accumulated work energy
+    total_work = sum(b.work for b in w if hasattr(b, "work"))
     st.session_state.work_history.append(total_work)
-    
-    bh_count = len([b for b in w if isinstance(b, BlackHole)])
+
+    # Black hole count
+    bh_count = sum(1 for b in w if isinstance(b, BlackHole))
     st.session_state.bh_count.append(bh_count)
     st.session_state.bh_history.append(bh_count)
-    
-    work_densities = [local_work_density(b, w) for b in w if hasattr(b, "work")]
+
+    # Work density peak (sample for performance)
+    sample = [b for b in w if hasattr(b, "work")]
+    if len(sample) > 30:  # Limit to 30 random samples for speed
+        sample = list(np.random.choice(sample, 30, replace=False))
+    work_densities = [local_work_density_fast(b) for b in sample]
     max_density = max(work_densities) if work_densities else 0
     st.session_state.work_density_max.append(max_density)
-    
-    # Element counts
+
     elements = {}
     for b in w:
         if hasattr(b, "el"):
             elements[b.el] = elements.get(b.el, 0) + 1
     st.session_state.element_counts = elements
-    
-    # Performance metrics
+
+    node_stats = {
+        "total": len(nodes),
+        "primary": sum(1 for n in nodes if n.node_type == "primary"),
+        "secondary": sum(1 for n in nodes if n.node_type == "secondary"),
+        "tertiary": sum(1 for n in nodes if n.node_type == "tertiary"),
+        "exotic": sum(1 for n in nodes if n.node_type == "exotic"),
+        "avg_life": np.mean([n.life for n in nodes]) if nodes else 0,
+        "avg_strength": np.mean([n.strength for n in nodes]) if nodes else 0,
+    }
+    st.session_state.node_stats_history.append(node_stats)
+
+    # Epoch tracking
+    st.session_state.epoch_history.append(current_epoch)
+
+    # Record new collapse events
+    known = len(st.session_state.collapse_history)
+    if len(COLLAPSE_LOG) > known:
+        st.session_state.collapse_history.extend(COLLAPSE_LOG[known:])
+
+    # Galaxy & star counts
+    stars = sum(1 for b in w if b.kind == "star")
+    galaxies = sum(1 for b in bubbles if not b.dead and b.star_count >= 3)
+    st.session_state.star_count_history.append(stars)
+    st.session_state.galaxy_count_history.append(galaxies)
+
     elapsed = time.time() - start_time
-    st.session_state.performance_metrics[st.session_state.iteration] = {
+    st.session_state.performance_metrics[iteration] = {
         "time": elapsed,
         "particles": len(w),
         "bh_count": bh_count,
-        "work_density": max_density
+        "work_density": max_density,
+        "nodes": len(nodes),
+        "bubbles": len(bubbles),
+        "epoch": current_epoch,
     }
-    
+
+    st.session_state.reservoir_history.append(get_framework_reservoir())
     st.session_state.iteration += 1
-    
-    # Check auto-stop conditions
+
+    # Auto-stop
     if batch_mode and auto_stop:
         if stop_condition == "Max work density reached" and max_density >= stop_threshold:
             st.session_state.stop_flag = True
@@ -199,9 +275,10 @@ def step():
         elif stop_condition == "Bubbles spawned" and len(bubbles) >= stop_threshold:
             st.session_state.stop_flag = True
 
-# ============== MAIN LAYOUT ==============
 
-# Helper function to render state tree
+# ═══════════════════════════════════════════════════════════════
+#  HELPER FUNCTIONS — rendering & display utilities
+# ═══════════════════════════════════════════════════════════════
 def render_tree(data, indent=0):
     output = ""
     for key, value in data.items():
@@ -217,71 +294,212 @@ def render_tree(data, indent=0):
             output += "  " * indent + f"├─ {key}\n"
     return output
 
-# Helper to display metrics
-def display_metrics():
-    col1, col2, col3, col4, col5 = st.columns(5)
+
+def display_epoch_banner():
+    """Show current cosmic epoch as a prominent banner"""
+    iteration = st.session_state.iteration
+    epoch_info = get_epoch_info(iteration)
+    eid = get_current_epoch(iteration)
+
+    # Progress to next epoch
+    epochs_with_start = [(k, v) for k, v in COSMIC_EPOCHS.items()
+                         if k > eid and "iteration_start" in v]
+    if epochs_with_start:
+        next_eid, next_epoch = epochs_with_start[0]
+        next_start = next_epoch["iteration_start"]
+        curr_start = COSMIC_EPOCHS[eid].get("iteration_start", 0)
+        progress = min((iteration - curr_start) / max(next_start - curr_start, 1), 1.0)
+        progress_pct = int(progress * 100)
+        color = epoch_info['color']
+        emoji_next = next_epoch['emoji']
+        name_next = next_epoch['name']
+        progress_bar_html = f"<div style='background:#333;border-radius:4px;height:6px;margin-top:6px;'><div style='background:{color};width:{progress_pct}%;height:6px;border-radius:4px;'></div></div><small style='color:#aaa;'>→ next: {emoji_next} {name_next} (iter {next_start})</small>"
+    else:
+        progress_bar_html = "<small style='color:#aaa;'>Final epoch reached</small>"
+
+    color = epoch_info['color']
+    emoji = epoch_info['emoji']
+    name = epoch_info['name']
+    desc = epoch_info['description']
     
-    bh = len([b for b in st.session_state.world if isinstance(b, BlackHole)])
+    html_banner = f"<div style='background: linear-gradient(90deg, {color}33, transparent); border-left: 4px solid {color}; padding: 12px 16px; border-radius: 8px; margin-bottom: 12px;'><span style='font-size:1.4em;'>{emoji}</span> <strong style='font-size:1.1em; color:{color};'>Epoch {eid}: {name}</strong><p style='color:#ccc; margin:4px 0 0 0; font-size:0.9em;'>{desc}</p>{progress_bar_html}</div>"
+    
+    st.markdown(html_banner, unsafe_allow_html=True)
+
+
+def display_metrics():
+    # Epoch banner first
+    display_epoch_banner()
+
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    bh = sum(1 for b in st.session_state.world if isinstance(b, BlackHole))
     nu = st.session_state.element_counts.get("nu", 0)
     h_atoms = st.session_state.element_counts.get("H", 0)
     bubbles_count = len(st.session_state.bubbles)
     max_work_density = max(st.session_state.work_density_max) if st.session_state.work_density_max else 0
-    
+    nodes_count = len(st.session_state.nodes)
+
     col1.metric("Iteration", st.session_state.iteration)
     col2.metric("Black Holes", bh)
     col3.metric("Neutrinos", nu)
     col4.metric("Hydrogen", h_atoms)
     col5.metric("Work Density", f"{max_work_density:.1f}")
+    col6.metric("Work Nodes", nodes_count)
 
-# Helper to display graphs
-def display_graphs():
-    if len(st.session_state.work_history) > 1:
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 8))
-        fig.suptitle("WTF Universe Dynamics Analysis", fontsize=14, fontweight='bold')
-        
-        ax1.plot(st.session_state.work_history, linewidth=2, color="cyan")
-        ax1.set_ylabel("Total Work", color="cyan")
-        ax1.tick_params(axis='y', labelcolor='cyan')
-        ax1.grid(True, alpha=0.3)
-        ax1.set_title("Energy Accumulation")
-        
-        ax2.plot(st.session_state.bh_count, linewidth=2, color="magenta")
-        ax2.set_ylabel("BH Count", color="magenta")
-        ax2.tick_params(axis='y', labelcolor='magenta')
-        ax2.grid(True, alpha=0.3)
-        ax2.set_title("Singularity Formation")
-        
-        ax3.plot(st.session_state.work_density_max, linewidth=2, color="lime")
-        ax3.axhline(y=CRITICAL_WORK_DENSITY, color='red', linestyle='--', linewidth=2, label=f"Critical: {CRITICAL_WORK_DENSITY}")
-        ax3.set_ylabel("Work Density (ρW)", color="lime")
-        ax3.tick_params(axis='y', labelcolor='lime')
-        ax3.legend(loc='upper left')
-        ax3.grid(True, alpha=0.3)
-        ax3.set_title("Singularity Threshold")
-        
-        elements = st.session_state.element_counts
-        if elements:
-            elem_names = list(elements.keys())
-            elem_counts = list(elements.values())
-            colors_map = {
-                "nu": "#9933ff", "e": "#ff66ff", "p": "#ff3333",
-                "n": "#666666", "H": "#4444ff", "He": "#44ffff",
-                "C": "#00ff00", "O": "#ffaa00", "Fe": "#ff0000", "Ni": "#aa00ff"
-            }
-            bar_colors = [colors_map.get(e, "#888888") for e in elem_names]
-            ax4.bar(elem_names, elem_counts, color=bar_colors)
-            ax4.set_ylabel("Count")
-            ax4.set_title("Particle Distribution")
-            ax4.grid(True, alpha=0.3, axis='y')
-        
-        plt.tight_layout()
+    col1b, col2b, col3b, col4b, col5b, col6b = st.columns(6)
+    current_reservoir = get_framework_reservoir()
+    reservoir_percent = (current_reservoir / FRAMEWORK_RESERVOIR) * 100
+    total_energy = total_material_energy(st.session_state.world)
+    stars_count = sum(1 for b in st.session_state.world if b.kind == "star")
+    particles_count = sum(1 for b in st.session_state.world if b.kind == "particle")
+    galaxies = sum(1 for b in st.session_state.bubbles if not b.dead and b.star_count >= 3)
+
+    col1b.metric("Universe Bubbles", bubbles_count)
+    col2b.metric("Stars", stars_count)
+    col3b.metric("Galaxies", galaxies)
+    col4b.metric("Total Matter Energy", f"{total_energy:.0f}")
+    col5b.metric("Reservoir Left", f"{reservoir_percent:.1f}%")
+    col6b.metric("Energy Spent", f"{(FRAMEWORK_RESERVOIR - current_reservoir)/1e6:.1f}M")
+
+
+def display_collapses():
+    """Collapse event log — galactic BH, direct collapses, AGN flares."""
+    events = st.session_state.get("collapse_history", [])
+    if not events:
+        st.info("No collapse events yet. Galaxy disruptions appear here.")
+        return
+    from collections import Counter
+    counts = Counter(e["type"] for e in events)
+    c1, c2, c3 = st.columns(3)
+    c1.metric("⚫ Galactic BH",    counts.get("galactic_bh", 0))
+    c2.metric("💥 Direct collapse", counts.get("direct_collapse", 0))
+    c3.metric("🔥 AGN flares",     counts.get("agn_flare", 0))
+    st.markdown("---")
+    if len(events) > 1:
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as mpatches
+        fig, ax = plt.subplots(figsize=(14, 3))
+        fig.patch.set_facecolor("#0e1117")
+        ax.set_facecolor("#1a1a2e")
+        colors  = {"galactic_bh":"#FF4500","direct_collapse":"#FFD700","agn_flare":"#00BFFF"}
+        markers = {"galactic_bh":"v","direct_collapse":"x","agn_flare":"*"}
+        for e in events:
+            ax.scatter(e["step"], e["peak_density"],
+                       c=colors.get(e["type"],"#888"),
+                       marker=markers.get(e["type"],"o"),
+                       s=80+e["galaxy_size"]*10, alpha=0.85, zorder=3)
+        ax.axhline(CRITICAL_WORK_DENSITY, color="red", lw=1.5, linestyle="--")
+        ax.axhline(CRITICAL_WORK_DENSITY*0.6, color="orange", lw=1, linestyle=":")
+        ax.set_xlabel("Iteration", color="white")
+        ax.set_ylabel("Peak ρ at Collapse", color="white")
+        ax.set_title("Collapse Events Timeline", color="white")
+        ax.tick_params(colors="white")
+        legend_els = [
+            mpatches.Patch(color="#FF4500", label="Galactic BH"),
+            mpatches.Patch(color="#FFD700", label="Direct collapse"),
+            mpatches.Patch(color="#00BFFF", label="AGN flare"),
+            mpatches.Patch(color="red",     label=f"Critical ρ={CRITICAL_WORK_DENSITY}"),
+        ]
+        ax.legend(handles=legend_els, loc="upper left",
+                  facecolor="#1a1a2e", labelcolor="white", fontsize=8)
+        ax.grid(True, alpha=0.2)
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
+    st.markdown("**Recent events (last 15):**")
+    emoji_map = {"galactic_bh":"⚫","direct_collapse":"💥","agn_flare":"🔥"}
+    for e in reversed(events[-15:]):
+        event_emoji = emoji_map.get(e['type'], '❓')
+        event_type = e['type']
+        event_step = e['step']
+        event_size = e['galaxy_size']
+        event_dens = e['peak_density']
+        event_mass = e['mass']
+        st.markdown(
+            f"{event_emoji} **step {event_step}** — "
+            f"`{event_type}` | galaxy={event_size}★ | "
+            f"peak_ρ={event_dens:.1f} | mass={event_mass:.0f}"
+        )
 
-# Helper to display 3D visualization
+
+def display_graphs():
+    if len(st.session_state.work_history) < 2:
+        return
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 8))
+    fig.patch.set_facecolor('#0e1117')
+    for ax in axes.flat:
+        ax.set_facecolor('#1a1a2e')
+        ax.tick_params(colors='white')
+        for spine in ax.spines.values():
+            spine.set_edgecolor('#444')
+
+    ax1, ax2, ax5, ax3, ax4, ax6 = axes[0,0], axes[0,1], axes[0,2], axes[1,0], axes[1,1], axes[1,2]
+    fig.suptitle("WTF Universe Dynamics", fontsize=14, fontweight='bold', color='white')
+
+    ax1.plot(st.session_state.work_history, linewidth=2, color="cyan")
+    ax1.set_ylabel("Total Work", color="cyan"); ax1.tick_params(axis='y', labelcolor='cyan')
+    ax1.grid(True, alpha=0.3); ax1.set_title("Energy Accumulation", color='white')
+
+    ax2.plot(st.session_state.bh_count, linewidth=2, color="magenta")
+    ax2.set_ylabel("BH Count", color="magenta"); ax2.tick_params(axis='y', labelcolor='magenta')
+    ax2.grid(True, alpha=0.3); ax2.set_title("Singularity Formation", color='white')
+
+    ax3.plot(st.session_state.work_density_max, linewidth=2, color="lime")
+    ax3.axhline(y=CRITICAL_WORK_DENSITY, color='red', linestyle='--', linewidth=2,
+                label=f"Critical: {CRITICAL_WORK_DENSITY}")
+    ax3.set_ylabel("Work Density (ρW)", color="lime"); ax3.tick_params(axis='y', labelcolor='lime')
+    ax3.legend(loc='upper left', fontsize=8); ax3.grid(True, alpha=0.3)
+    ax3.set_title("Singularity Threshold", color='white')
+
+    # Node evolution
+    if st.session_state.node_stats_history:
+        nh = st.session_state.node_stats_history
+        ax4.plot([s['total'] for s in nh], color="yellow", label="Total")
+        ax4.plot([s['primary'] for s in nh], color="orange", alpha=0.7, label="Primary")
+        ax4.plot([s['secondary'] for s in nh], color="cyan", alpha=0.7, label="Secondary")
+        ax4.plot([s['exotic'] for s in nh], color="red", alpha=0.7, label="Exotic")
+        ax4.set_ylabel("Node Count", color="yellow"); ax4.tick_params(axis='y', labelcolor='yellow')
+        ax4.legend(fontsize=8); ax4.grid(True, alpha=0.3)
+        ax4.set_title("Work Nodes Evolution", color='white')
+
+    # Reservoir
+    if st.session_state.reservoir_history:
+        rn = [r / FRAMEWORK_RESERVOIR for r in st.session_state.reservoir_history]
+        ax5.plot(rn, linewidth=2, color="gold")
+        ax5.fill_between(range(len(rn)), rn, alpha=0.3, color="gold")
+        ax5.set_ylabel("Reservoir Level", color="gold"); ax5.tick_params(axis='y', labelcolor='gold')
+        ax5.set_ylim([0, 1.1])
+        ax5.axhline(y=0, color='red', linestyle='--', linewidth=2, alpha=0.5)
+        ax5.grid(True, alpha=0.3); ax5.set_title("Framework Energy Reservoir", color='white')
+
+    # Stars & Galaxies (NEW!)
+    if st.session_state.star_count_history:
+        ax6.plot(st.session_state.star_count_history, color="#FFD700", linewidth=2, label="Stars")
+        ax6.plot(st.session_state.galaxy_count_history, color="#7B68EE", linewidth=2, label="Galaxies")
+
+        # Shade epoch regions
+        epoch_colors = {0: "#FF4500", 1: "#FF8C00", 2: "#4B0082", 3: "#FFD700",
+                        4: "#00BFFF", 5: "#7B68EE", 6: "#FF6347", 7: "#20B2AA"}
+        if st.session_state.epoch_history:
+            eh = st.session_state.epoch_history
+            prev = eh[0]; start = 0
+            for i, ep in enumerate(eh[1:], 1):
+                if ep != prev:
+                    ax6.axvspan(start, i, alpha=0.1, color=epoch_colors.get(prev, "#888"))
+                    start = i; prev = ep
+            ax6.axvspan(start, len(eh), alpha=0.1, color=epoch_colors.get(prev, "#888"))
+
+        ax6.set_ylabel("Count", color="white"); ax6.tick_params(axis='y', labelcolor='white')
+        ax6.legend(fontsize=8); ax6.grid(True, alpha=0.3)
+        ax6.set_title("Stars & Galaxies Formation", color='white')
+
+    plt.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
 def display_3d():
     st.markdown("### 🔮 3D Visualization")
-    
     data = []
     for b in st.session_state.world:
         if isinstance(b, WhiteHole):
@@ -291,184 +509,173 @@ def display_3d():
                 "x": float(b.pos[0]), "y": float(b.pos[1]), "z": float(b.pos[2]),
                 "r": b.radius, "kind": b.kind, "el": b.el
             })
-    
     for b in st.session_state.bubbles:
         data.append({
             "x": float(b.center[0]), "y": float(b.center[1]), "z": float(b.center[2]),
             "r": b.radius, "kind": "bubble", "el": "bubble"
         })
-    
     for n in st.session_state.nodes:
         data.append({
             "x": float(n.pos[0]), "y": float(n.pos[1]), "z": float(n.pos[2]),
             "r": 0.5, "kind": "node", "el": "node"
         })
-    
     html = open("components/wtf_3d.html").read()
     html = html.replace("__DATA__", json.dumps(data))
     st.components.v1.html(html, height=650)
 
-# Helper to display state tree
+
 def display_tree():
     st.markdown("### 🌳 Simulation State Tree")
-    
-    elements_dict = {f"{k}: {v}" for k, v in sorted(st.session_state.element_counts.items())}
-    
+    elements_dict = {f"{k}: {v}": None for k, v in sorted(st.session_state.element_counts.items())}
+    node_stats = {
+        "Primary": sum(1 for n in st.session_state.nodes if n.node_type == "primary"),
+        "Secondary": sum(1 for n in st.session_state.nodes if n.node_type == "secondary"),
+        "Tertiary": sum(1 for n in st.session_state.nodes if n.node_type == "tertiary"),
+        "Exotic": sum(1 for n in st.session_state.nodes if n.node_type == "exotic"),
+    }
+    epoch_info = get_epoch_info(st.session_state.iteration)
     tree_data = {
         "🌌 Universe": {
             f"Iteration: {st.session_state.iteration}": None,
+            f"{epoch_info['emoji']} Epoch: {epoch_info['name']}": None,
             "🤍 White Hole": {
                 f"Mass: {st.session_state.white.mass:.0f}": None,
                 f"Energy: {st.session_state.white.energy:.1f}": None,
             },
-            f"⚫ Black Holes ({len([b for b in st.session_state.world if isinstance(b, BlackHole)])})": {
-                f"Total Mass: {sum([b.mass for b in st.session_state.world if isinstance(b, BlackHole)]):.0f}": None,
+            f"⚫ Black Holes ({sum(1 for b in st.session_state.world if isinstance(b, BlackHole))})": {
+                f"Total Mass: {sum(b.mass for b in st.session_state.world if isinstance(b, BlackHole)):.0f}": None,
             },
             "⚛️ Particles": {
                 f"Total: {len(st.session_state.world) - 1}": None,
                 "Elements": elements_dict,
             },
             "🫧 Universe Bubbles": {
-                f"Count: {len(st.session_state.bubbles)}": None
+                f"Count: {len(st.session_state.bubbles)}": None,
+                f"Galaxies: {sum(1 for b in st.session_state.bubbles if not b.dead and b.star_count >= 3)}": None,
+            },
+            "⚙️ Work Nodes": {
+                f"Total: {len(st.session_state.nodes)}": None,
+                "Types": node_stats,
             },
             "📊 System State": {
-                f"Total Work: {sum([b.work for b in st.session_state.world if hasattr(b, 'work')]):.1f}": None,
+                f"Total Work: {sum(b.work for b in st.session_state.world if hasattr(b, 'work')):.1f}": None,
                 f"Max Work Density: {max(st.session_state.work_density_max) if st.session_state.work_density_max else 0:.1f}": None,
             }
         }
     }
-    
     st.code(render_tree(tree_data), language="text")
 
-# ============== MODE SELECTION ==============
+
+# ═══════════════════════════════════════════════════════════════
+#  MODE SELECTION — live, batch, or manual stepping
+# ═══════════════════════════════════════════════════════════════
 if live_mode:
-    st.sidebar.info("🔴 Live mode active - continuous updates")
-    
+    st.sidebar.info("🔴 Live mode active")
     metrics_placeholder = st.empty()
     graph_placeholder = st.empty()
     tree_placeholder = st.empty()
     viz_placeholder = st.empty()
-    
+
     while live_mode:
         for _ in range(speed):
             step()
-        
         with metrics_placeholder.container():
             display_metrics()
-        
         with graph_placeholder.container():
             if show_history:
                 display_graphs()
-        
         with tree_placeholder.container():
             if show_tree:
                 display_tree()
-        
         with viz_placeholder.container():
             if show_3d:
                 display_3d()
-        
         time.sleep(1.0 / live_fps)
 
 elif batch_mode:
     st.sidebar.info("📦 Batch mode active")
-    
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("▶ Run Batch"):
+            # Run specified number of simulation steps with progress tracking
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
             for i in range(batch_size):
                 step()
                 progress_bar.progress((i + 1) / batch_size)
-                status_text.text(f"Batch progress: {i + 1}/{batch_size}")
-                
+                status_text.text(f"Batch: {i+1}/{batch_size} | "
+                                 f"Epoch {get_current_epoch(st.session_state.iteration)}: "
+                                 f"{get_epoch_info(st.session_state.iteration)['name']}")
+                # Check auto-stop conditions
                 if st.session_state.stop_flag:
                     st.warning(f"⏹ Auto-stopped at iteration {st.session_state.iteration}")
                     st.session_state.stop_flag = False
                     break
-            
             st.success("✅ Batch complete!")
-    
     with col2:
         if st.button("📊 Analyze Batch"):
-            st.markdown("### 📈 Batch Performance Analysis")
-            
+            # Performance analysis: step time & particle count evolution
             if st.session_state.performance_metrics:
                 iters = sorted(st.session_state.performance_metrics.keys())
                 times = [st.session_state.performance_metrics[i]["time"] for i in iters]
                 particles = [st.session_state.performance_metrics[i]["particles"] for i in iters]
-                
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-                
                 ax1.plot(iters, times, marker='o', color='orange')
-                ax1.set_xlabel("Iteration")
-                ax1.set_ylabel("Time per step (s)")
-                ax1.set_title("Performance Timeline")
-                ax1.grid(True, alpha=0.3)
-                
+                ax1.set_xlabel("Iteration"); ax1.set_ylabel("Time per step (s)")
+                ax1.set_title("Performance Timeline"); ax1.grid(True, alpha=0.3)
                 ax2.plot(iters, particles, marker='s', color='cyan')
-                ax2.set_xlabel("Iteration")
-                ax2.set_ylabel("Particle Count")
-                ax2.set_title("System Size Evolution")
-                ax2.grid(True, alpha=0.3)
-                
+                ax2.set_xlabel("Iteration"); ax2.set_ylabel("Particle Count")
+                ax2.set_title("System Size Evolution"); ax2.grid(True, alpha=0.3)
                 plt.tight_layout()
                 st.pyplot(fig, use_container_width=True)
                 plt.close(fig)
-    
     with col3:
         if st.button("🔄 Reset"):
+            # Clear all session state and restart
             st.session_state.clear()
             st.rerun()
-    
+
     st.markdown("---")
     display_metrics()
     st.markdown("---")
-    
-    if show_history:
-        display_graphs()
-    
-    if show_tree:
-        st.markdown("---")
-        display_tree()
-    
-    if show_3d:
-        st.markdown("---")
-        display_3d()
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Graphs", "💥 Collapses", "🌳 State", "🔮 3D"])
+    with tab1:
+        if show_history: display_graphs()
+    with tab2:
+        display_collapses()
+    with tab3:
+        if show_tree: display_tree()
+    with tab4:
+        if show_3d: display_3d()
 
 else:
-    # Standard mode (non-live, non-batch)
+    # MANUAL STEPPING MODE: single step or 10-step run
     col1, col2, col3 = st.columns(3)
-    
     with col1:
         if st.button("▶ Step", key="step_btn"):
-            step()
-    
+            step()  # Single iteration
     with col2:
         if st.button("⏸ Run (10 steps)", key="run_btn"):
+            # Run 10 steps with progress bar
             progress_bar = st.progress(0)
             for i in range(10):
                 step()
                 progress_bar.progress((i + 1) / 10)
-    
     with col3:
         if st.button("🔄 Reset Universe"):
+            # Full state reset
             st.session_state.clear()
             st.rerun()
-    
+
     st.markdown("---")
     display_metrics()
     st.markdown("---")
-    
-    if show_history:
-        display_graphs()
-    
-    if show_tree:
-        st.markdown("---")
-        display_tree()
-    
-    if show_3d:
-        st.markdown("---")
-        display_3d()
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Graphs", "💥 Collapses", "🌳 State", "🔮 3D"])
+    with tab1:
+        if show_history: display_graphs()
+    with tab2:
+        display_collapses()
+    with tab3:
+        if show_tree: display_tree()
+    with tab4:
+        if show_3d: display_3d()
