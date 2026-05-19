@@ -23,9 +23,7 @@ from datetime import datetime
 st.set_page_config(layout="wide")
 st.title("🌌 WTF – Universe with Work Density Singularity")
 
-# ═══════════════════════════════════════════════════════════════
-#  SIDEBAR CONTROLS — simulation parameters & visualization options
-# ═══════════════════════════════════════════════════════════════
+# ============== SIDEBAR CONTROLS ==============
 with st.sidebar:
     st.markdown("### ⚙️ Simulation Controls")
     col1, col2 = st.columns(2)
@@ -53,13 +51,12 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 📊 Visualization")
-    # Toggles for visualization components
     show_3d    = st.toggle("Show 3D View", True)
     show_tree  = st.toggle("Show State Tree", True)
     show_history = st.toggle("Show History Graphs", True)
 
     st.markdown("---")
-    st.markdown("### 💾 Persistence & Snapshots")
+    st.markdown("### 💾 Persistence")
     col1, col2 = st.columns(2)
     with col1:
         if st.button("💾 Save State"):
@@ -91,9 +88,7 @@ with st.sidebar:
                 st.error(f"Error loading: {e}")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  SESSION STATE — persistent storage across reruns
-# ═══════════════════════════════════════════════════════════════
+# ============== SESSION STATE INITIALIZATION ==============
 if "world" not in st.session_state:
     w, white, nodes = create_universe()
     st.session_state.world = w
@@ -116,9 +111,7 @@ if "world" not in st.session_state:
     st.session_state.collapse_history     = []   # collapse events
 
 
-# ═══════════════════════════════════════════════════════════════
-#  STEP FUNCTION — core simulation loop with physics sequence
-# ═══════════════════════════════════════════════════════════════
+# ============== STEP FUNCTION ==============
 def step():
     w      = st.session_state.world
     white  = st.session_state.white
@@ -128,94 +121,78 @@ def step():
 
     start_time = time.time()
 
-    # Rebuild spatial hash once per step for O(1) neighbor lookups
+    # --- Rebuild spatial hash ONCE per step ---
     spatial_hash.build(w)
 
-    # Inject new neutrino clouds from framework reservoir
     framework_feed(w)
-    # White hole processes nearby clouds (ejection, heating)
     white.process(w)
 
-    # Compute SPH density and thermodynamics for all clouds
+    # SPH density pass — sets rho, P, cs for all clouds at once
     epoch = get_current_epoch(iteration)
-    sph_density_pass(w)  # Sets ρ, P, c_s for each cloud
+    sph_density_pass(w)
 
-    # Update cloud dynamics: SPH forces, Hubble expansion, cooling
+    # Cloud update (SPH forces + cooling)
     for b in w[:]:
         if isinstance(b, WhiteHole):
-            continue  # White hole handled separately
+            continue
         if isinstance(b, BlackHole):
-            b.update_bh(w)  # Black hole accretion & explosion check
+            b.update_bh(w)
         else:
-            b.update(w, dt, nodes, use_spatial=True, epoch=epoch)  # SPH dynamics
-            phase_walls(b)  # Boundary conditions
+            b.update(w, dt, nodes, use_spatial=True, epoch=epoch)
+            phase_walls(b)
 
-    # Epoch-aware chemistry: nu→e→p→H→He→... transitions
+    # Assemble matter — epoch-aware chemistry
     for b in w:
         if not isinstance(b, (WhiteHole, BlackHole)):
             assemble(b, nodes, epoch=epoch)
 
-    # Black hole accretion of nearby clouds
+    # Accretion
     accretion_fast(w)
 
-    # Cloud-cloud collisions and fusion reactions
+    # Cloud-cloud collisions / fusions
     w[:] = collide_all_fast(w)
 
-    # Merge overlapping clouds (momentum & mass conservation)
+    # Cloud merging (overlapping diffuse clouds → one)
     merge_clouds(w)
 
-    # Jeans instability: fragment massive clouds into smaller pieces
+    # Jeans fragmentation (overmassive clouds split)
     split_cloud(w, epoch=epoch)
 
-    # Remove evaporated clouds (below CLOUD_MIN_MASS threshold)
+    # Remove evaporated clouds
     evaporate_small_clouds(w)
 
-    # Merge nearby black holes
     merge_black_holes(w)
-    # Spawn new black holes where work density exceeds critical threshold
     spawn_black_holes(w, white)
 
-    # UNIVERSE BUBBLES: multiverse mechanics
-    # Create new universe bubbles via node flythrough ignition
+    # Multiverse
     spawn_multiverse(bubbles, w, nodes, step=iteration)
-    # Seed new work nodes inside existing bubbles
     internal_nodes(bubbles, nodes)
-    # Update node positions (drift) and decay
     update_nodes(nodes, w, epoch=epoch)
-    # Node interactions: dominant repulsion, satellite absorption
     node_interactions_in_bubbles(bubbles, nodes)
-    # Bubble radius & energy evolution
     universe_evolution(bubbles, w, nodes)
 
-    # Clean up dead/empty bubbles
     for u in bubbles:
         decay_dead_universe(u, nodes)
 
-    # Epoch-specific events: recombination, star formation, galaxy assembly
+    # === COSMIC EPOCH EVENTS (replaces old star_formation call) ===
     current_epoch = cosmic_epoch_events(w, bubbles, nodes, iteration)
 
-    # Bubble feedback heating of internal clouds
     universe_feedback(bubbles, w)
-    # Bubble gravity attraction on nearby clouds
     interact_universes(bubbles, w)
-    # Work nodes gravity on assembled matter
     node_gravity(w, nodes)
-    # Boundary condition: space decay at edges
     space_decay(w)
 
-    # ─── METRICS COLLECTION ───
-    # Total accumulated work energy
+    # --- Metrics ---
     total_work = sum(b.work for b in w if hasattr(b, "work"))
     st.session_state.work_history.append(total_work)
 
-    # Black hole count
     bh_count = sum(1 for b in w if isinstance(b, BlackHole))
     st.session_state.bh_count.append(bh_count)
     st.session_state.bh_history.append(bh_count)
 
-    # Work density peak (sample for performance)
+    # Work density — sample only up to 30 random bodies for speed
     sample = [b for b in w if hasattr(b, "work")]
-    if len(sample) > 30:  # Limit to 30 random samples for speed
+    if len(sample) > 30:
         sample = list(np.random.choice(sample, 30, replace=False))
     work_densities = [local_work_density_fast(b) for b in sample]
     max_density = max(work_densities) if work_densities else 0
@@ -276,9 +253,7 @@ def step():
             st.session_state.stop_flag = True
 
 
-# ═══════════════════════════════════════════════════════════════
-#  HELPER FUNCTIONS — rendering & display utilities
-# ═══════════════════════════════════════════════════════════════
+# ============== HELPERS ==============
 def render_tree(data, indent=0):
     output = ""
     for key, value in data.items():
@@ -309,22 +284,22 @@ def display_epoch_banner():
         next_start = next_epoch["iteration_start"]
         curr_start = COSMIC_EPOCHS[eid].get("iteration_start", 0)
         progress = min((iteration - curr_start) / max(next_start - curr_start, 1), 1.0)
-        progress_pct = int(progress * 100)
-        color = epoch_info['color']
-        emoji_next = next_epoch['emoji']
-        name_next = next_epoch['name']
-        progress_bar_html = f"<div style='background:#333;border-radius:4px;height:6px;margin-top:6px;'><div style='background:{color};width:{progress_pct}%;height:6px;border-radius:4px;'></div></div><small style='color:#aaa;'>→ next: {emoji_next} {name_next} (iter {next_start})</small>"
+        progress_bar_html = f"<div style=\"background:#333;border-radius:4px;height:6px;margin-top:6px;\"><div style=\"background:{epoch_info['color']};width:{int(progress*100)}%;height:6px;border-radius:4px;\"></div></div><small style=\"color:#aaa;\">→ next: {next_epoch['emoji']} {next_epoch['name']} (iter {next_start})</small>"
     else:
         progress_bar_html = "<small style='color:#aaa;'>Final epoch reached</small>"
 
-    color = epoch_info['color']
-    emoji = epoch_info['emoji']
-    name = epoch_info['name']
-    desc = epoch_info['description']
-    
-    html_banner = f"<div style='background: linear-gradient(90deg, {color}33, transparent); border-left: 4px solid {color}; padding: 12px 16px; border-radius: 8px; margin-bottom: 12px;'><span style='font-size:1.4em;'>{emoji}</span> <strong style='font-size:1.1em; color:{color};'>Epoch {eid}: {name}</strong><p style='color:#ccc; margin:4px 0 0 0; font-size:0.9em;'>{desc}</p>{progress_bar_html}</div>"
-    
-    st.markdown(html_banner, unsafe_allow_html=True)
+    st.markdown(f"""
+    <div style="background: linear-gradient(90deg, {epoch_info['color']}33, transparent);
+                border-left: 4px solid {epoch_info['color']};
+                padding: 12px 16px; border-radius: 8px; margin-bottom: 12px;">
+      <span style="font-size:1.4em;">{epoch_info['emoji']}</span>
+      <strong style="font-size:1.1em; color:{epoch_info['color']};">
+        Epoch {eid}: {epoch_info['name']}
+      </strong>
+      <p style="color:#ccc; margin:4px 0 0 0; font-size:0.9em;">{epoch_info['description']}</p>
+      {progress_bar_html}
+    </div>
+    """, unsafe_allow_html=True)
 
 
 def display_metrics():
@@ -381,8 +356,8 @@ def display_collapses():
         fig, ax = plt.subplots(figsize=(14, 3))
         fig.patch.set_facecolor("#0e1117")
         ax.set_facecolor("#1a1a2e")
-        colors  = {"galactic_bh":"#FF4500","direct_collapse":"#FFD700","agn_flare":"#00BFFF"}
-        markers = {"galactic_bh":"v","direct_collapse":"x","agn_flare":"*"}
+        colors  = {"galactic_bh":"#FF4500","direct_collapse":"#FFD700","agn_flare":"#00BFFF","framework_drain_bh":"#9B59B6"}
+        markers = {"galactic_bh":"v","direct_collapse":"x","agn_flare":"*","framework_drain_bh":"D"}
         for e in events:
             ax.scatter(e["step"], e["peak_density"],
                        c=colors.get(e["type"],"#888"),
@@ -406,18 +381,12 @@ def display_collapses():
         st.pyplot(fig, use_container_width=True)
         plt.close(fig)
     st.markdown("**Recent events (last 15):**")
-    emoji_map = {"galactic_bh":"⚫","direct_collapse":"💥","agn_flare":"🔥"}
+    emoji = {"galactic_bh":"⚫","direct_collapse":"💥","agn_flare":"🔥","framework_drain_bh":"🕳️"}
     for e in reversed(events[-15:]):
-        event_emoji = emoji_map.get(e['type'], '❓')
-        event_type = e['type']
-        event_step = e['step']
-        event_size = e['galaxy_size']
-        event_dens = e['peak_density']
-        event_mass = e['mass']
         st.markdown(
-            f"{event_emoji} **step {event_step}** — "
-            f"`{event_type}` | galaxy={event_size}★ | "
-            f"peak_ρ={event_dens:.1f} | mass={event_mass:.0f}"
+            f"{emoji.get(e['type'],'❓')} **step {e['step']}** — "
+            f"`{e['type']}` | galaxy={e['galaxy_size']}★ | "
+            f"peak_ρ={e['peak_density']:.1f} | mass={e['mass']:.0f}"
         )
 
 
@@ -498,26 +467,55 @@ def display_graphs():
     plt.close(fig)
 
 
+# Complete element → colour mapping (hex). Used in 3D view and legends.
+EL_COLOR = {
+    "nu":     "#4444FF",   # dim blue     — neutrino plasma
+    "e":      "#00FFFF",   # cyan         — electrons
+    "p":      "#FF8800",   # orange       — protons
+    "n":      "#888888",   # GREY         — free neutrons (unstable, short-lived)
+    "H":      "#FFFFFF",   # white        — hydrogen
+    "He":     "#FFFF00",   # yellow       — helium
+    "C":      "#FF6600",   # amber        — carbon
+    "O":      "#00FF88",   # mint         — oxygen
+    "Fe":     "#CC4444",   # red-brown    — iron
+    "Ni":     "#AA66FF",   # violet       — nickel (endpoint)
+    "bh":     "#000000",   # black        — black hole
+    "white":  "#FFFFFF",   # white        — white hole
+    "bubble": "#3333AA",   # dark blue    — universe bubble
+    "node":   "#FFAA00",   # gold         — work node
+    "star":   "#FFD700",   # gold-yellow  — star
+}
+
 def display_3d():
     st.markdown("### 🔮 3D Visualization")
     data = []
     for b in st.session_state.world:
         if isinstance(b, WhiteHole):
-            data.append({"x": 0, "y": 0, "z": 0, "r": 1.0, "kind": "white", "el": "white"})
+            data.append({"x": 0, "y": 0, "z": 0, "r": 1.0,
+                         "kind": "white", "el": "white",
+                         "color": EL_COLOR["white"]})
         else:
+            el   = getattr(b, 'el', 'nu')
+            kind = getattr(b, 'kind', 'cloud')
+            # Stars get star colour regardless of element
+            color = EL_COLOR.get("star" if kind == "star" else el,
+                                 EL_COLOR.get(kind, "#888888"))
             data.append({
                 "x": float(b.pos[0]), "y": float(b.pos[1]), "z": float(b.pos[2]),
-                "r": b.radius, "kind": b.kind, "el": b.el
+                "r": b.radius, "kind": kind, "el": el, "color": color
             })
     for b in st.session_state.bubbles:
         data.append({
             "x": float(b.center[0]), "y": float(b.center[1]), "z": float(b.center[2]),
-            "r": b.radius, "kind": "bubble", "el": "bubble"
+            "r": b.radius, "kind": "bubble", "el": "bubble",
+            "color": EL_COLOR["bubble"]
         })
     for n in st.session_state.nodes:
+        node_color = {"primary": "#FF6600", "exotic": "#FF00FF"}.get(
+            n.node_type, EL_COLOR["node"])
         data.append({
             "x": float(n.pos[0]), "y": float(n.pos[1]), "z": float(n.pos[2]),
-            "r": 0.5, "kind": "node", "el": "node"
+            "r": 0.5, "kind": "node", "el": "node", "color": node_color
         })
     html = open("components/wtf_3d.html").read()
     html = html.replace("__DATA__", json.dumps(data))
@@ -526,7 +524,7 @@ def display_3d():
 
 def display_tree():
     st.markdown("### 🌳 Simulation State Tree")
-    elements_dict = {f"{k}: {v}": None for k, v in sorted(st.session_state.element_counts.items())}
+    elements_dict = {f"{k}: {v}" for k, v in sorted(st.session_state.element_counts.items())}
     node_stats = {
         "Primary": sum(1 for n in st.session_state.nodes if n.node_type == "primary"),
         "Secondary": sum(1 for n in st.session_state.nodes if n.node_type == "secondary"),
@@ -566,9 +564,7 @@ def display_tree():
     st.code(render_tree(tree_data), language="text")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  MODE SELECTION — live, batch, or manual stepping
-# ═══════════════════════════════════════════════════════════════
+# ============== MODE SELECTION ==============
 if live_mode:
     st.sidebar.info("🔴 Live mode active")
     metrics_placeholder = st.empty()
@@ -597,7 +593,6 @@ elif batch_mode:
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("▶ Run Batch"):
-            # Run specified number of simulation steps with progress tracking
             progress_bar = st.progress(0)
             status_text = st.empty()
             for i in range(batch_size):
@@ -606,7 +601,6 @@ elif batch_mode:
                 status_text.text(f"Batch: {i+1}/{batch_size} | "
                                  f"Epoch {get_current_epoch(st.session_state.iteration)}: "
                                  f"{get_epoch_info(st.session_state.iteration)['name']}")
-                # Check auto-stop conditions
                 if st.session_state.stop_flag:
                     st.warning(f"⏹ Auto-stopped at iteration {st.session_state.iteration}")
                     st.session_state.stop_flag = False
@@ -614,7 +608,6 @@ elif batch_mode:
             st.success("✅ Batch complete!")
     with col2:
         if st.button("📊 Analyze Batch"):
-            # Performance analysis: step time & particle count evolution
             if st.session_state.performance_metrics:
                 iters = sorted(st.session_state.performance_metrics.keys())
                 times = [st.session_state.performance_metrics[i]["time"] for i in iters]
@@ -631,7 +624,6 @@ elif batch_mode:
                 plt.close(fig)
     with col3:
         if st.button("🔄 Reset"):
-            # Clear all session state and restart
             st.session_state.clear()
             st.rerun()
 
@@ -649,21 +641,18 @@ elif batch_mode:
         if show_3d: display_3d()
 
 else:
-    # MANUAL STEPPING MODE: single step or 10-step run
     col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("▶ Step", key="step_btn"):
-            step()  # Single iteration
+            step()
     with col2:
         if st.button("⏸ Run (10 steps)", key="run_btn"):
-            # Run 10 steps with progress bar
             progress_bar = st.progress(0)
             for i in range(10):
                 step()
                 progress_bar.progress((i + 1) / 10)
     with col3:
         if st.button("🔄 Reset Universe"):
-            # Full state reset
             st.session_state.clear()
             st.rerun()
 

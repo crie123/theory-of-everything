@@ -53,8 +53,12 @@ NODE_DRIFT         = 0.0015
 # epoch 0-1 : fast outward (radiation pressure / ionization front)
 # epoch 2   : slowing (recombination)
 # epoch 3+  : nearly frozen (dark-matter halo anchoring)
-NODE_DRIFT_BY_EPOCH = {0: 5.08, 1: 3.05, 2: 1.012, 3: 0.004,
-                       4: 0.002, 5: 0.001, 6: 0.001, 7: 0.001}
+# Drift scaled to new epoch timing (peaks ~1500 iterations)
+# Epoch 0-1 (0-500 iter): fast drift for universe ignition
+# Epoch 2-3 (500-1200):   slowing as matter dominates
+# Epoch 4+  (1200+):      nearly frozen, anchored in halos
+NODE_DRIFT_BY_EPOCH = {0: 0.08, 1: 0.04, 2: 0.008, 3: 0.003,
+                       4: 0.001, 5: 0.001, 6: 0.0005, 7: 0.0005}
 
 # How many steps a newly formed element survives before the burnout
 # check can destroy it.  Prevents the "instant dissociation" loop.
@@ -68,10 +72,12 @@ BUBBLE_TYPES = {
     "exotic":{"base_el": "C",  "node_bias": 0.6, "energy": 300, "node_rate": 0.01},
 }
 
-FRAMEWORK_RESERVOIR = 20_000_000
+FRAMEWORK_RESERVOIR = 1_000_000
 FRAMEWORK_DECAY     = 0.00001
 
 ELEMENTS = ["nu", "e", "p", "n", "H", "He", "C", "O", "Fe", "Ni"]
+# n = free neutron (unstable, beta-decays to H within a few steps)
+# Ni = iron-group endpoint (binding energy maximum, no further fusion)
 
 # ============================================================
 # SPH CLOUD PARAMETERS
@@ -125,29 +131,36 @@ COSMIC_EPOCHS = {
         "description": "Extreme energy, only quarks and leptons", "color": "#FF4500"},
     1: {"name": "Primordial Nucleosynthesis",      "emoji": "⚛️",
         "description": "Protons & neutrons fuse into H, He-4, Li", "color": "#FF8C00",
-        "iteration_start": 30},
+        "iteration_start": 200},
     2: {"name": "Recombination / Dark Ages",       "emoji": "🌑",
         "description": "Universe cools, neutral atoms form, photons decouple", "color": "#4B0082",
-        "iteration_start": 80},
+        "iteration_start": 500},
     3: {"name": "First Stars (Pop III)",           "emoji": "🌟",
         "description": "Massive, metal-free stars ignite — UV floods the universe", "color": "#FFD700",
-        "iteration_start": 150},
+        "iteration_start": 900},
     4: {"name": "Reionization",                    "emoji": "☀️",
         "description": "First stars re-ionize surrounding gas", "color": "#00BFFF",
-        "iteration_start": 220},
+        "iteration_start": 1200},
     5: {"name": "First Galaxies",                  "emoji": "🌌",
         "description": "Protogalaxies assemble around dark matter halos", "color": "#7B68EE",
-        "iteration_start": 300},
+        "iteration_start": 1500},
     6: {"name": "Cosmic Noon",                     "emoji": "🔥",
         "description": "Peak star formation rate, quasar activity", "color": "#FF6347",
-        "iteration_start": 450},
+        "iteration_start": 2000},
     7: {"name": "Modern Universe",                 "emoji": "🪐",
         "description": "Galaxies mature, dark energy dominates", "color": "#20B2AA",
-        "iteration_start": 650},
+        "iteration_start": 2500},
 }
 
 _framework_reservoir = FRAMEWORK_RESERVOIR
+_framework_drain     = 0.0   # total energy permanently lost to framework
 _current_epoch       = 0
+
+# Minimum viable energy for a cloud to exist as matter.
+# Below this, the cloud "falls through the framework" — provalivaetsya v karkas.
+# This is the permanent sink: no resurrection, no revolution.
+FRAMEWORK_FLOOR_T    = 0.05   # minimum temperature before provál
+FRAMEWORK_FLOOR_MASS = 3.0    # minimum mass before provál
 
 # ── Collapse event log ────────────────────────────────────────────────────
 # Each entry: {"step": int, "type": str, "pos": array, "mass": float,
@@ -517,6 +530,53 @@ def evaporate_small_clouds(world):
                         and b.mass < CLOUD_MIN_MASS)]
 
 
+def framework_collapse(world, step=0):
+    """
+    Dip in carcass — permanent energy sink.
+
+    A cloud that has exhausted both its mass and thermal energy falls
+    through the framework floor. Two outcomes:
+
+    1. Wandering micro-BH (high |vel|, low T, low mass):
+       Brief Hawking-like flash — tiny BH that radiates and vanishes
+       instantly. No singularity, no accretion. Just a luminosity spike
+       and permanent removal.
+
+    2. Cold dead cloud (low |vel|, low T):
+       Silent removal. Energy drains to framework permanently.
+
+    In both cases: no resurrection, no revolution, no recycling.
+    Energy conservation: drained energy added to _framework_drain.
+    """
+    global _framework_drain
+    to_remove = set()
+
+    for b in world:
+        if not isinstance(b, Cloud): continue
+        if b.kind in ("whitehole", "bh", "star"): continue
+
+        # Check floor conditions: both T and mass must be depleted
+        t_depleted    = b.T    < FRAMEWORK_FLOOR_T
+        mass_depleted = b.mass < FRAMEWORK_FLOOR_MASS * 2
+
+        if not (t_depleted and mass_depleted): continue
+
+        speed = np.linalg.norm(b.vel)
+
+        if speed > 0.5 and b.mass > FRAMEWORK_FLOOR_MASS:
+            # Wandering micro-BH: high velocity + minimal energy
+            # Brief flash (logged as collapse event), then permanent removal
+            log_collapse(step, "framework_drain_bh", b.pos,
+                         b.mass, b.T * b.mass, galaxy_size=0)
+
+        # Permanent drain — energy exits the system
+        _framework_drain += b.T * b.mass
+        to_remove.add(id(b))
+
+    if to_remove:
+        world[:] = [b for b in world if id(b) not in to_remove]
+
+
 # ============================================================
 # WHITE HOLE
 # ============================================================
@@ -541,17 +601,30 @@ class WhiteHole(Cloud):
                     self._revolution(b)
 
     def _explode_bh(self, bh, world):
-        for _ in range(40):
-            p = Cloud(bh.pos + np.random.randn(3)*0.4, 30, 0.15,
-                      "cloud", "nu", temperature=20, N=5)
-            p.vel = np.random.randn(3)*0.6
+        """White hole processes BH: conserved mass split into N fragments."""
+        n_fragments = 20
+        frag_mass   = max(bh.mass / n_fragments, 5.0)
+        frag_T      = max(bh.T   / n_fragments, 1.0)   # energy conserved
+        for _ in range(n_fragments):
+            p = Cloud(bh.pos + np.random.randn(3)*0.4, frag_mass, 0.15,
+                      "cloud", "nu", temperature=frag_T, N=3)
+            p.vel = np.random.randn(3) * min(0.6, np.sqrt(frag_T * 0.01))
             world.append(p)
         if bh in world:
             world.remove(bh)
 
     def _revolution(self, b):
-        b.el = "nu"; b.kind = "cloud"
-        b.T  = 15;   b.mass = 40; b.radius = 0.2
+        """Recycle cloud back to nu — conserve mass, shed most energy to framework."""
+        global _framework_drain
+        # Energy shed: white hole absorbs most of the thermal energy
+        # Only a small fraction returns as kinetic heat of the nu cloud
+        energy_shed = b.T * b.mass * 0.85
+        _framework_drain += energy_shed
+        b.el     = "nu"
+        b.kind   = "cloud"
+        b.T      = max(b.T * 0.15, FEED_ENERGY * 0.1)   # retain 15% as heat
+        b.radius = max(b.radius * 0.5, 0.2)
+        # mass conserved — white hole doesn't create or destroy mass
 
     # legacy method names
     def explode_bh(self, bh, world): self._explode_bh(bh, world)
@@ -574,6 +647,16 @@ def assemble(b, nodes=None, epoch=0):
       instantly destroyed — models finite mean-free-path of radiation.
     """
     b._el_age += 1
+
+    # ── Free neutron beta-decay — unconditional, node-independent ─────
+    # n → p + e⁻ + ν̄ₑ → H (or p if cold). Half-life ~15min real.
+    # Must run before any node-field checks.
+    if b.el == "n":
+        if np.random.rand() < 0.15:
+            b.el = "H" if b.T > TH_NU_E else "p"
+            b._el_age = 0
+        return   # neutrons skip all other assembly logic
+
 
     if not nodes:
         # decay back to nu only if grace period is over
@@ -607,7 +690,7 @@ def assemble(b, nodes=None, epoch=0):
         # Heavy elements (H+) are gravitationally/chemically stable
         grace = ASSEMBLY_GRACE_STEPS.get(b.el, 5)
         if b.el != "nu" and b._el_age > grace:
-            if b.el not in ("H","He","C","O","Fe","Ni","n"):
+            if b.el not in ("H","He","C","O","Fe","Ni"):
                 b.el = "nu"; b._el_age = 0
         return
 
@@ -655,6 +738,14 @@ def assemble(b, nodes=None, epoch=0):
         if np.random.rand() < rate:
             b.el = "He"; b.T *= 0.8
 
+    # Free neutron beta-decay → always becomes H (or p if very cold)
+    # Rate: ~1/15min real, here scaled to a few steps
+    if b.el == "n":
+        if np.random.rand() < 0.15:   # fast decay
+            b.el = "H" if T > TH_NU_E else "p"
+            b._el_age = 0
+        return   # neutrons don't follow normal assembly
+
     # Epoch 2: recombination — p + e⁻ → H  (density-enhanced)
     if epoch >= 2 and b.el == "p" and T < TH_E_P * 1.5:
         if np.random.rand() < 0.005 * (1 + rho / 50.0):
@@ -671,12 +762,44 @@ def assemble(b, nodes=None, epoch=0):
 # FUSION & COLLISION
 # ============================================================
 def fuse(c1, c2):
+    """
+    Physical nuclear fusion ladder.
+    Skip 'n' (neutron) as a stable intermediate — neutrons are unstable
+    free particles (half-life 15min), immediately beta-decay to proton.
+    Ni-62 is the binding energy peak — endpoint, no further exothermic fusion.
+    Ni accumulation beyond mass cap → direct collapse (framework drain path).
+    """
     order = {k: i for i, k in enumerate(ELEMENTS)}
-    if order.get(c1.el, 0) < order.get(c2.el, 0):
-        idx = ELEMENTS.index(c1.el)
-        if idx < len(ELEMENTS)-1:
-            c1.el = ELEMENTS[idx+1]
-    c1.T *= 1.1
+
+    # Only fuse if c1 is lighter element
+    if order.get(c1.el, 0) >= order.get(c2.el, 0):
+        c1.T *= 1.05   # elastic collision heating only
+        return
+
+    # Physical fusion ladder — skip neutron as stable product
+    FUSION_NEXT = {
+        "nu": "e",    # QGP
+        "e":  "p",    # pair production
+        "p":  "H",    # p+p → deuterium → H  (skip free neutron)
+        "n":  "H",    # free neutron beta-decays to H immediately
+        "H":  "He",   # stellar: H burning
+        "He": "C",    # stellar: helium flash → C
+        "C":  "O",    # carbon burning
+        "O":  "Fe",   # oxygen/silicon burning → Fe-group
+        "Fe": "Ni",   # Fe + alpha → Ni (only in extreme conditions)
+        "Ni": None,   # endpoint — no exothermic fusion beyond Ni-62
+    }
+
+    next_el = FUSION_NEXT.get(c1.el)
+
+    if next_el is None:
+        # Ni endpoint: mass accumulation → instability → framework drain path
+        # Mark cloud as overloaded — will be caught by framework_collapse
+        c1.T   *= 0.3    # Ni fusion is endothermic — COOLS the cloud
+        c1.mass = min(c1.mass, CLOUD_SPLIT_MASS * 0.9)  # cap mass
+    else:
+        c1.el = next_el
+        c1.T *= 1.1      # exothermic fusion heating
 
 
 def collide(c1, c2):
@@ -710,10 +833,14 @@ def collide_all_fast(world):
 # ============================================================
 def framework_feed(world):
     global _framework_reservoir
-    if not FRAMEWORK_FEED or _framework_reservoir <= 0:
+    if not FRAMEWORK_FEED: return
+    # Hard floor: reservoir cannot feed below zero
+    if _framework_reservoir <= 0:
+        _framework_reservoir = 0.0
         return
     _framework_reservoir *= (1 - FRAMEWORK_DECAY)
-    if np.random.rand() < FEED_RATE:
+    cost = FEED_ENERGY * 10 * FEED_PARTICLES_PER_TICK
+    if np.random.rand() < FEED_RATE and _framework_reservoir >= cost:
         for _ in range(FEED_PARTICLES_PER_TICK):
             pos = np.random.randn(3) * (PHASE_WALL_R * 0.8)
             c   = Cloud(pos, 50, 0.5, "cloud", "nu",
@@ -730,18 +857,26 @@ def total_material_energy(world):
 def get_framework_reservoir():
     return _framework_reservoir
 
+def get_framework_drain():
+    """Total energy permanently lost to framework (dip sink)."""""
+    return _framework_drain
+
 
 # ============================================================
 # SUPERNOVA (standalone)
 # ============================================================
 def supernova(b, world):
+    """Stellar explosion: conserve total mass and energy."""""
     if b.mass > 800:
-        for _ in range(20):
-            p = Cloud(b.pos + np.random.randn(3)*0.3, 30, 0.3,
-                      "cloud", "H", temperature=b.T*15, N=3)
+        n_ejecta  = 20
+        ejecta_mass = b.mass * 0.7 / n_ejecta   # 70% ejected
+        ejecta_T    = b.T * 2.0 / n_ejecta       # energy split (not multiplied)
+        for _ in range(n_ejecta):
+            p = Cloud(b.pos + np.random.randn(3)*0.3, ejecta_mass, 0.3,
+                      "cloud", "H", temperature=ejecta_T, N=3)
             p.vel = np.random.randn(3)*0.4
             world.append(p)
-        b.mass *= 0.3; b.el = "Fe"
+        b.mass *= 0.3; b.el = "Fe"; b.T *= 0.3   # remnant cools too
 
 
 # ============================================================
@@ -791,10 +926,14 @@ def merge_black_holes(world):
 
 
 def explode_bh(bh, world):
-    for _ in range(60):
-        p = Cloud(bh.pos + np.random.randn(3), 30, 0.3,
-                  "cloud", "nu", temperature=20, N=5)
-        p.vel = np.random.randn(3)
+    """BH self-explosion (overheated): conserved mass/energy fragments."""""
+    n_fragments = 30
+    frag_mass   = max(bh.mass / n_fragments, 5.0)
+    frag_T      = max(bh.T   / n_fragments, 1.0)
+    for _ in range(n_fragments):
+        p = Cloud(bh.pos + np.random.randn(3)*0.5, frag_mass, 0.3,
+                  "cloud", "nu", temperature=frag_T, N=3)
+        p.vel = np.random.randn(3) * min(1.0, np.sqrt(frag_T * 0.01))
         world.append(p)
     if bh in world: world.remove(bh)
 
@@ -977,15 +1116,21 @@ def spawn_multiverse(bubbles, world, nodes, step=0):
         bubbles.append(bub)
         _last_bubble_step = step
 
-        # Seed bubble: 3 hot nu clouds + 4 internal work nodes
-        # (Big Bang: hot dense plasma + immediate field structure)
-        for _ in range(3):
-            seed_pos = n.pos + np.random.randn(3) * bub.radius * 0.3
-            seed = Cloud(seed_pos, mass=80, radius=0.6,
-                         kind="cloud", el="nu",
-                         temperature=FEED_ENERGY * 5, N=20)
-            seed._el_age = -20   # negative age = immunity window, won't merge away
-            world.append(seed)
+        # Seed bubble: hot nu clouds drawn from bubble's own energy budget
+        # Energy is NOT free — it's debited from bub.energy (locked-in ignition)
+        n_seeds     = 3
+        seed_mass   = 80
+        seed_T      = min(FEED_ENERGY * 3, bub.energy / (n_seeds * 2))
+        seed_cost   = seed_mass * seed_T * n_seeds
+        if bub.energy >= seed_cost:
+            bub.energy -= seed_cost
+            for _ in range(n_seeds):
+                seed_pos = n.pos + np.random.randn(3) * bub.radius * 0.3
+                seed = Cloud(seed_pos, mass=seed_mass, radius=0.6,
+                             kind="cloud", el="nu",
+                             temperature=seed_T, N=20)
+                seed._el_age = -20
+                world.append(seed)
 
         # Place 4 internal nodes spread across bubble radius
         for i in range(4):
