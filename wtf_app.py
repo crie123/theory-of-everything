@@ -14,6 +14,8 @@ from wtf_model import (
     WhiteHole, BlackHole, Cloud,
     FRAMEWORK_RESERVOIR, CRITICAL_WORK_DENSITY, COSMIC_EPOCHS,
     COLLAPSE_LOG, log_collapse, node_gravity,
+    framework_collapse, get_framework_drain,
+    cleanup_dead_bubbles, count_active_bubbles, count_galaxies,
 )
 import numpy as np
 import time
@@ -162,7 +164,7 @@ def step():
     evaporate_small_clouds(w)
 
     merge_black_holes(w)
-    spawn_black_holes(w, white)
+    spawn_black_holes(w, white, bubbles=bubbles)
 
     # Multiverse
     spawn_multiverse(bubbles, w, nodes, step=iteration)
@@ -173,6 +175,7 @@ def step():
 
     for u in bubbles:
         decay_dead_universe(u, nodes)
+    cleanup_dead_bubbles(bubbles)   # remove fully spent bubbles
 
     # === COSMIC EPOCH EVENTS (replaces old star_formation call) ===
     current_epoch = cosmic_epoch_events(w, bubbles, nodes, iteration)
@@ -310,7 +313,8 @@ def display_metrics():
     bh = sum(1 for b in st.session_state.world if isinstance(b, BlackHole))
     nu = st.session_state.element_counts.get("nu", 0)
     h_atoms = st.session_state.element_counts.get("H", 0)
-    bubbles_count = len(st.session_state.bubbles)
+    bubbles_count     = count_active_bubbles(st.session_state.bubbles)
+    bubbles_all_count = len(st.session_state.bubbles)
     max_work_density = max(st.session_state.work_density_max) if st.session_state.work_density_max else 0
     nodes_count = len(st.session_state.nodes)
 
@@ -327,9 +331,11 @@ def display_metrics():
     total_energy = total_material_energy(st.session_state.world)
     stars_count = sum(1 for b in st.session_state.world if b.kind == "star")
     particles_count = sum(1 for b in st.session_state.world if b.kind == "particle")
-    galaxies = sum(1 for b in st.session_state.bubbles if not b.dead and b.star_count >= 3)
+    galaxies = count_galaxies(st.session_state.bubbles)
 
-    col1b.metric("Universe Bubbles", bubbles_count)
+    col1b.metric("Universe Bubbles",
+                 f"{bubbles_count} / {bubbles_all_count}",
+                 help="active / total (including spent)")
     col2b.metric("Stars", stars_count)
     col3b.metric("Galaxies", galaxies)
     col4b.metric("Total Matter Energy", f"{total_energy:.0f}")

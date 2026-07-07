@@ -858,13 +858,35 @@ def get_framework_reservoir():
     return _framework_reservoir
 
 def get_framework_drain():
-    """Total energy permanently lost to framework (dip sink)."""""
+    """Total energy permanently lost to framework (provál sink)."""""
     return _framework_drain
 
 
 # ============================================================
 # SUPERNOVA (standalone)
 # ============================================================
+
+DEAD_BUBBLE_GRACE = 30   # steps before dead bubble is removed
+
+def cleanup_dead_bubbles(bubbles):
+    """Remove fully spent bubbles after grace period.
+    Fixes counter showing dead bubbles as active.
+    """
+    bubbles[:] = [
+        b for b in bubbles
+        if not b.dead
+        or (not hasattr(b, '_dead_since'))
+        or (b.age - b._dead_since < DEAD_BUBBLE_GRACE)
+    ]
+
+def count_active_bubbles(bubbles):
+    """Count truly active (not dead) bubbles."""
+    return sum(1 for b in bubbles if not b.dead)
+
+def count_galaxies(bubbles):
+    """Count proto-galaxies (active bubbles with 3+ stars)."""
+    return sum(1 for b in bubbles if not b.dead and b.star_count >= 3)
+
 def supernova(b, world):
     """Stellar explosion: conserve total mass and energy."""""
     if b.mass > 800:
@@ -903,10 +925,26 @@ class BlackHole(Cloud):
             explode_bh(self, world)
 
 
-def spawn_black_holes(world, white):
+def spawn_black_holes(world, white, bubbles=None):
+    """
+    BHs only form inside active universe bubbles.
+    In open space there is nothing to anchor a singularity —
+    it dissipates immediately (Hawking-like evaporation at low density).
+    """
     for b in world:
         if np.linalg.norm(b.pos - white.pos) < WHITE_RADIUS * 1.5:
             continue
+
+        # Must be inside an active bubble
+        if bubbles is not None:
+            in_bub = any(
+                not bub.dead and
+                np.linalg.norm(b.pos - bub.center) < bub.radius
+                for bub in bubbles
+            )
+            if not in_bub:
+                continue
+
         rho  = local_work_density_fast(b)
         grad = np.linalg.norm(b.vel)
         if rho > CRITICAL_WORK_DENSITY and grad > WORK_GRADIENT_MIN:
@@ -915,6 +953,9 @@ def spawn_black_holes(world, white):
 
 
 def merge_black_holes(world):
+    # Remove ghost BHs (mass=0 or negative) — remnants of energy drain
+    world[:] = [b for b in world
+                if not (isinstance(b, BlackHole) and b.mass <= 0)]
     bhs = [b for b in world if isinstance(b, BlackHole)]
     for i in range(len(bhs)):
         for j in range(i+1, len(bhs)):
@@ -1354,18 +1395,43 @@ def cosmic_epoch_events(world, bubbles, nodes, iteration):
 # ============================================================
 # UNIVERSE FEEDBACK
 # ============================================================
+# Maximum bubble energy — prevents runaway inflation
+# Bubble can't grow beyond this regardless of internal work
+BUBBLE_MAX_ENERGY = 10000.0
+
 def universe_feedback(bubbles, world):
+    """
+    Bubble energy feedback — STRICTLY from internal matter only.
+    Work done by nodes/clouds OUTSIDE the bubble boundary does not
+    contribute. This prevents inflation from nothing.
+    """
     for bub in bubbles:
         if bub.dead: continue
-        local = [b for b in world
-                 if np.linalg.norm(b.pos - bub.center) < bub.radius]
-        W = sum(b.work for b in local)
-        bub.energy += W * UNIVERSE_WORK_FEEDBACK
-        # Bubble radiates energy into internal clouds, heating them
-        # This enables chemistry: cold nu clouds inside get heated to TH_NU_E
-        if local and bub.energy > 10:
-            heat = min(bub.energy * 0.001, 5.0) / len(local)
-            for b in local:
+
+        # Only count objects strictly inside the bubble boundary
+        internal = [b for b in world
+                    if not isinstance(b, (WhiteHole,))
+                    and np.linalg.norm(b.pos - bub.center) < bub.radius]
+
+        if not internal:
+            # Empty bubble: energy drains faster (no internal support)
+            bub.energy *= 0.995
+            continue
+
+        # Work from internal matter only
+        W_internal = sum(b.work for b in internal)
+
+        # Energy gain capped: bubble can't grow beyond BUBBLE_MAX_ENERGY
+        if bub.energy < BUBBLE_MAX_ENERGY:
+            gain = W_internal * UNIVERSE_WORK_FEEDBACK
+            # Additional cap: gain limited to 0.5% of current energy per step
+            gain = min(gain, bub.energy * 0.005, BUBBLE_MAX_ENERGY - bub.energy)
+            bub.energy += gain
+
+        # Radiate heat into internal clouds (enable chemistry)
+        if internal and bub.energy > 10:
+            heat = min(bub.energy * 0.0005, 2.0) / len(internal)
+            for b in internal:
                 b.T = max(b.T, b.T + heat)
 
 
@@ -1427,14 +1493,38 @@ def space_decay(world):
 # UNIVERSE EVOLUTION
 # ============================================================
 def universe_evolution(bubbles, world, nodes):
+    """
+    Bubble evolution: radius grows only when internal matter provides pressure.
+    Empty bubble = vacuum — cannot inflate (no radiation pressure source).
+    Bubble collapses if energy depleted OR if it's been empty too long.
+    """
     for u in bubbles:
         u.age += 1
-        matter = [b for b in world if np.linalg.norm(b.pos-u.center) < u.radius]
-        work   = sum(b.work for b in matter)*0.002
-        u.energy -= work + 0.02*u.radius
-        if u.energy > 80: u.radius += 0.001
-        else:             u.radius *= 0.999
-        if u.energy < 5:  u.dead = True
+        matter = [b for b in world
+                  if not isinstance(b, WhiteHole)
+                  and np.linalg.norm(b.pos - u.center) < u.radius]
+        work   = sum(b.work for b in matter) * 0.002
+
+        # Energy drain from internal work + radius maintenance cost
+        u.energy -= work + 0.02 * u.radius
+
+        if matter:
+            # Has matter: normal expansion/contraction based on energy
+            if u.energy > 80:
+                u.radius += 0.001
+            else:
+                u.radius *= 0.999
+        else:
+            # Empty bubble: NO expansion — vacuum can't self-inflate
+            # Slow collapse instead
+            u.radius *= 0.998
+            u.energy *= 0.999   # energy leaks out of empty bubble
+
+        # Death conditions
+        if u.energy < 5 or u.radius < 0.5:
+            u.dead = True
+            if not hasattr(u, '_dead_since'):
+                u._dead_since = u.age
 
 
 def decay_dead_universe(u, nodes):
@@ -1470,8 +1560,10 @@ def node_interactions_in_bubbles(bubbles, nodes):
         d_min, nearest = min(dists, key=lambda x: x[0])
         if d_min < NODE_RADIUS:
             # Absorption: dominant gets stronger, satellite fades
-            nearest.strength = min(nearest.strength * 1.002,
-                                   NODE_STRENGTH_BASE * 12.0)
+            # Hard cap: dominant node can't exceed 4× base strength
+            # (beyond this it's a singularity, not a halo)
+            nearest.strength = min(nearest.strength * 1.001,
+                                   NODE_STRENGTH_BASE * 4.0)
             sat.life *= 0.97
         elif d_min < 5.0:
             # Weak gravitational pull toward dominant
