@@ -1,0 +1,173 @@
+\documentclass[11pt,oneside]{book}
+
+% ---------------------------------------------------------------
+% Packages
+% ---------------------------------------------------------------
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{geometry}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{titling}
+\usepackage[bookmarks,hidelinks,pdfusetitle]{hyperref}
+
+\geometry{paperwidth=7in, paperheight=10in, top=20mm, bottom=22mm, inner=20mm, outer=16mm}
+
+\definecolor{inkblue}{RGB}{25,35,60}
+\definecolor{rule}{RGB}{120,120,120}
+
+% Chapter / section styling
+\titleformat{\chapter}[display]
+  {\normalfont\bfseries\color{inkblue}}
+  {\Large\MakeUppercase{\chaptertitlename} \thechapter}
+  {6pt}
+  {\Huge}
+\titlespacing*{\chapter}{0pt}{10pt}{28pt}
+
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{inkblue}}{\thesection}{0.8em}{}
+\titleformat{\subsection}
+  {\normalfont\large\bfseries\color{inkblue}}{\thesubsection}{0.8em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\renewcommand{\headrulewidth}{0.3pt}
+\fancyhead[LE,RO]{\thepage}
+\fancyhead[RE]{\nouppercase{\leftmark}}
+\fancyhead[LO]{\nouppercase{\rightmark}}
+
+\setlength{\parindent}{1.2em}
+\setlength{\parskip}{0.2em}
+\tolerance=1200
+\emergencystretch=3em
+\hbadness=10000
+
+\title{Unified Configuration}
+\author{Kirill Nikitenko}
+\date{2026}
+
+\begin{document}
+
+% ---------------------------------------------------------------
+% Cover / Title page
+% ---------------------------------------------------------------
+\begin{titlepage}
+\centering
+\vspace*{2.2cm}
+
+{\color{rule}\rule{0.55\textwidth}{0.6pt}}
+
+\vspace{1.6cm}
+{\Large\scshape\color{inkblue} A Research Framework in Theoretical Physics}\\[0.8cm]
+
+{\fontsize{30}{34}\selectfont\bfseries\color{inkblue} Unified\\[0.15cm] Configuration}\\[0.6cm]
+
+{\Large\itshape Work Field Theory}
+
+\vspace{1.6cm}
+{\color{rule}\rule{0.55\textwidth}{0.6pt}}
+
+\vfill
+
+{\large Kirill Nikitenko}\\[0.3cm]
+{\large 2026}
+
+\vspace{1.2cm}
+\end{titlepage}
+
+\frontmatter
+
+% ---------------------------------------------------------------
+% Abstract
+% ---------------------------------------------------------------
+\chapter*{Abstract}
+\addcontentsline{toc}{chapter}{Abstract}
+
+Modern physics describes nature through several successful but conceptually
+disjoint languages: the states and operators of quantum theory, and the
+curved spacetime of general relativity. \emph{Unified Configuration}
+develops an alternative, exploratory layer of description in which the
+primitive object of physics is neither a particle nor a field in isolation,
+but a \emph{configuration} --- a stable, distributed state of energy in an
+abstract configuration space $\mathcal{C}$.
+
+Within this framework, matter is characterized as a local minimum of an
+energy functional $\mathcal{E}[q]$; work is reinterpreted as motion of a
+configuration through this landscape; and interactions, radiation, and
+gravitation are treated as different manifestations of the geometry and
+curvature of the same underlying space. Stability, transition, and decay are
+analyzed through the Hessian of the energy functional, and physical law is
+recast as a statement about the accessibility and connectivity of
+configuration space rather than about isolated equations of motion.
+
+The book develops this language systematically, from foundational
+definitions through a mathematical formalism, into applications spanning
+particle stability, field structure, and cosmological evolution, and closes
+by proposing configuration space itself as an object of long-term
+scientific and engineering inquiry. The framework is offered as a
+structure for generating testable models rather than as a finished theory;
+its scope and epistemic status are set out explicitly in the chapter that
+follows.
+
+% ---------------------------------------------------------------
+% How to Read This Work
+% ---------------------------------------------------------------
+\chapter*{How to Read This Work}
+\addcontentsline{toc}{chapter}{How to Read This Work}
+
+This chapter states, in advance, what kind of document follows and what
+kind of claims it makes. Three points define its scope.
+
+\bigskip
+\noindent\textbf{1. This is a hypothesis, not a replacement.}
+Quantum mechanics, quantum field theory, and general relativity remain the
+empirically established descriptions of nature within their tested domains,
+and nothing in this work is intended to contradict or supersede them.
+\emph{Unified Configuration} is a research hypothesis proposing a different
+\emph{level} of description --- a configuration-space language from which
+existing theories are conjectured to emerge as limiting cases. Every
+definition, equation, and interpretation offered here should be read as a
+proposal under active construction, not as an established result.
+
+\bigskip
+\noindent\textbf{2. Experiment governs the model, not the reverse.}
+Where a prediction of this framework conflicts with observation, the
+appropriate response is to revise the specific part of the model
+responsible for that prediction --- never to dismiss, reinterpret, or set
+aside the data. Declarative language in the chapters that follow (``is,''
+``requires,'' ``therefore'') is the working form in which a hypothesis is
+stated clearly; it is not a claim of settled fact. When evidence narrows or
+contradicts a particular construction, that construction is to be treated
+as provisional and open to revision, without this implying that the
+surrounding architecture is thereby invalidated.
+
+\bigskip
+\noindent\textbf{3. The goal is a structure, not a final answer.}
+This book does not aim to deliver a closed set of results. Its purpose is
+to provide a common structure --- configurations, energy functionals, and
+stability conditions --- within which specific, falsifiable models can be
+built, tested, and revised. Progress, in this sense, is measured less by
+whether any individual equation survives contact with experiment, and more
+by whether the framework continues to generate questions that can be
+checked against the world.
+
+\bigskip
+\noindent Readers are encouraged to keep these three points in mind
+throughout, particularly in later chapters where the language becomes more
+concrete and the temptation to read a working hypothesis as a finished
+theory is correspondingly greater.
+
+\tableofcontents
+
+\mainmatter
+
+% ---------------------------------------------------------------
+% Body
+% ---------------------------------------------------------------
+\input{body_reformatted.tex}
+
+\end{document}
